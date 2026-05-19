@@ -1,0 +1,5 @@
+users:
+  - username: admin
+    role: admin
+    # Genera hash con: npm run hash-password -- "cambia-questa-password"
+    passwordHash: "$2b$12$replace_me_with_real_hash"

@@ -1,0 +1,21 @@
+{
+  "name": "lakemailblock",
+  "version": "1.0.0",
+  "description": "Dual-mode mailban system (server/client) with nft sync, jsonl logs and reverse hook",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:server": "MODE=server node src/index.js",
+    "start:client": "MODE=client node src/index.js",
+    "hash-password": "node src/hashPassword.js"
+  },
+  "dependencies": {
+    "axios": "^1.9.0",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "js-yaml": "^4.1.0",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
