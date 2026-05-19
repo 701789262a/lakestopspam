@@ -87,6 +87,7 @@ Il client:
 - invia delta ban a `/api/change`
 - invia eventi ban/unban e packet logs a `/api/logs`
 - polla `/api/reverse/poll` e, se richiesto, invia conf nft a `/api/reverse/submit`
+- usa solo `API_KEY` per autenticare le chiamate ingest (non usa JWT)
 
 ## 5) Payload supportati
 
@@ -127,6 +128,7 @@ Il client:
 ## Note
 
 - Se imposti `NODE_API_KEYS`, il server valida chiavi per nodo (`node:key,node:key`) e ignora `INGEST_API_KEY`.
+- Il JWT (`/api/login`) resta solo per endpoint amministrativi.
 - I dati persistono su file JSON/JSONL in `./data`.
 - Su `reverse/submit` il server prende `config.ruleset`, fa `nft -c -f` (validate), poi scrive `NFT_APPLY_PATH` (default `/etc/nftables.conf`) e fa `nft -f`.
 - Se l'apply fallisce, tenta rollback dal backup `<NFT_APPLY_PATH>.bak-<timestamp>`.
