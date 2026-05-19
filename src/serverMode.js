@@ -4,7 +4,6 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 
-const axios = require('axios');
 const bcrypt = require('bcryptjs');
 const express = require('express');
 const jwt = require('jsonwebtoken');
@@ -38,25 +37,6 @@ function appendJsonl(filePath, records) {
   ensureDir(filePath);
   const lines = records.map((item) => JSON.stringify(item)).join('\n') + '\n';
   fs.appendFileSync(filePath, lines);
-}
-
-function parseNodeApiKeys(raw) {
-  const result = new Map();
-  if (!raw) {
-    return result;
-  }
-
-  for (const pair of raw.split(',')) {
-    const trimmed = pair.trim();
-    if (!trimmed) {
-      continue;
-    }
-    const [node, key] = trimmed.split(':').map((x) => x && x.trim());
-    if (node && key) {
-      result.set(node, key);
-    }
-  }
-  return result;
 }
 
 function parseBoolean(raw, fallback) {
@@ -157,7 +137,7 @@ async function validateAndApplyNftRuleset(ruleset, options) {
   } finally {
     try {
       fs.unlinkSync(tempFile);
-    } catch (err) {
+    } catch {
       // ignore cleanup error
     }
   }
@@ -214,57 +194,55 @@ function createAuthMiddleware(jwtSecret) {
       const decoded = jwt.verify(token, jwtSecret);
       req.user = decoded;
       return next();
-    } catch (err) {
+    } catch {
       return res.status(401).json({ detail: 'Invalid token' });
     }
   };
 }
 
-async function sendTelegram(tgBotToken, tgChatId, text) {
-  if (!tgBotToken || !tgChatId) {
-    return;
+function requireRole(allowedRoles) {
+  return (req, res, next) => {
+    const role = req.user && req.user.role;
+    if (!role || !allowedRoles.includes(role)) {
+      return res.status(403).json({ detail: 'Insufficient role' });
+    }
+    return next();
+  };
+}
+
+function resolveNodeFromRequest(req, providedNode) {
+  const role = req.user && req.user.role;
+  const tokenNode = req.user && req.user.node;
+
+  if (role === 'admin') {
+    const node = typeof providedNode === 'string' && providedNode ? providedNode : tokenNode;
+    return node || null;
   }
 
-  const url = `https://api.telegram.org/bot${tgBotToken}/sendMessage`;
-  try {
-    await axios.post(url, {
-      chat_id: tgChatId,
-      text,
-      parse_mode: 'HTML',
-    }, { timeout: 10000 });
-  } catch (err) {
-    const status = err.response ? err.response.status : 'no_status';
-    console.error(`[ERROR] Telegram send failed (${status})`);
+  if (!tokenNode) {
+    return null;
   }
+
+  if (typeof providedNode === 'string' && providedNode && providedNode !== tokenNode) {
+    return '__forbidden__';
+  }
+
+  return tokenNode;
 }
 
 function buildBanMessage(node, added, removed, currentSet) {
-  const lines = [`<b>Mailban - ${node}</b>`];
-
-  if (added.length) {
-    lines.push(`\n+ Aggiunti (${added.length})`);
-    for (const ip of added) {
-      lines.push(`<code>${ip}</code>`);
-    }
-  }
-
-  if (removed.length) {
-    lines.push(`\n- Rimossi (${removed.length})`);
-    for (const ip of removed) {
-      lines.push(`<code>${ip}</code>`);
-    }
-  }
-
-  lines.push(`\nTotale bannati: ${currentSet.size}`);
-  return lines.join('\n');
+  const lines = [
+    `node=${node}`,
+    `added=${added.length}`,
+    `removed=${removed.length}`,
+    `total=${currentSet.size}`,
+  ];
+  return lines.join(' ');
 }
 
 async function startServer() {
   const host = process.env.HOST || '0.0.0.0';
   const port = Number(process.env.PORT || 8000);
-
-  const ingestApiKey = process.env.INGEST_API_KEY || process.env.API_KEY || '';
-  const nodeApiKeys = parseNodeApiKeys(process.env.NODE_API_KEYS || '');
 
   const jwtSecret = process.env.JWT_SECRET || 'change-me-now';
   const jwtExpiry = process.env.JWT_EXPIRES_IN || '12h';
@@ -279,9 +257,6 @@ async function startServer() {
   const nftBinary = process.env.NFT_BIN || 'nft';
   const nftCmdTimeoutMs = Number(process.env.NFT_CMD_TIMEOUT_MS || 10000);
 
-  const tgBotToken = process.env.TG_BOT_TOKEN || '';
-  const tgChatId = process.env.TG_CHAT_ID || '';
-
   const stateRaw = readJsonFile(stateFile, {});
   const state = new Map(Object.entries(stateRaw).map(([node, ips]) => [node, new Set(Array.isArray(ips) ? ips : [])]));
 
@@ -294,20 +269,8 @@ async function startServer() {
   app.use(express.json({ limit: '2mb' }));
   app.use(express.text({ type: ['application/x-ndjson', 'text/plain'], limit: '5mb' }));
 
-  const requireLogin = createAuthMiddleware(jwtSecret);
-
-  function checkIngestAuth(node, apikey) {
-    if (!apikey || typeof apikey !== 'string') {
-      return false;
-    }
-
-    if (nodeApiKeys.size > 0) {
-      const expected = nodeApiKeys.get(node);
-      return expected ? apikey === expected : false;
-    }
-
-    return ingestApiKey ? apikey === ingestApiKey : false;
-  }
+  const requireAuth = createAuthMiddleware(jwtSecret);
+  const requireAdmin = [requireAuth, requireRole(['admin'])];
 
   function persistState() {
     const serializable = {};
@@ -353,24 +316,35 @@ async function startServer() {
       return res.status(401).json({ detail: 'Invalid credentials' });
     }
 
+    const role = typeof user.role === 'string' && user.role ? user.role : 'client';
+    const node = typeof user.node === 'string' ? user.node : undefined;
+
     const token = jwt.sign(
-      { sub: username, role: user.role || 'user' },
+      { sub: username, role, node },
       jwtSecret,
       { expiresIn: jwtExpiry }
     );
 
-    return res.json({ status: 'ok', token, user: { username, role: user.role || 'user' } });
+    return res.json({
+      status: 'ok',
+      token,
+      user: { username, role, node: node || null },
+    });
   });
 
-  app.post('/api/change', async (req, res) => {
-    const { node, apikey, added, removed } = req.body || {};
+  app.post('/api/change', requireAuth, (req, res) => {
+    const { node: bodyNode, added, removed } = req.body || {};
 
-    if (typeof node !== 'string' || !isStringArray(added) || !isStringArray(removed)) {
+    if (!isStringArray(added) || !isStringArray(removed)) {
       return res.status(400).json({ detail: 'Invalid payload format' });
     }
 
-    if (!checkIngestAuth(node, apikey)) {
-      return res.status(401).json({ detail: 'Invalid API key' });
+    const node = resolveNodeFromRequest(req, bodyNode);
+    if (!node) {
+      return res.status(403).json({ detail: 'Node missing in token' });
+    }
+    if (node === '__forbidden__') {
+      return res.status(403).json({ detail: 'Node mismatch with token' });
     }
 
     const current = state.get(node) || new Set();
@@ -383,20 +357,14 @@ async function startServer() {
     state.set(node, current);
     persistState();
 
-    console.log(`[CHANGE] node=${node} +${added.length} -${removed.length} total=${current.size}`);
-
-    if (added.length || removed.length) {
-      const message = buildBanMessage(node, added, removed, current);
-      await sendTelegram(tgBotToken, tgChatId, message);
-    }
+    console.log(`[CHANGE] ${buildBanMessage(node, added, removed, current)}`);
 
     return res.json({ status: 'ok', node, total: current.size });
   });
 
-  app.post('/api/logs', (req, res) => {
+  app.post('/api/logs', requireAuth, (req, res) => {
     const body = req.body;
-    let apikey = null;
-    let node = null;
+    let bodyNode = null;
     let events = [];
 
     if (typeof body === 'string') {
@@ -407,30 +375,31 @@ async function startServer() {
           if (parsed && typeof parsed === 'object') {
             events.push(parsed);
           }
-        } catch (err) {
+        } catch {
           return res.status(400).json({ detail: 'Invalid JSONL line' });
         }
       }
       if (events.length > 0) {
-        node = events[0].node;
-        apikey = events[0].apikey;
+        bodyNode = events[0].node;
       }
     } else if (Array.isArray(body)) {
       events = body;
-      node = events[0] && events[0].node;
-      apikey = events[0] && events[0].apikey;
+      bodyNode = events[0] && events[0].node;
     } else if (body && typeof body === 'object') {
       if (Array.isArray(body.events)) {
         events = body.events;
       } else {
         events = [body];
       }
-      node = body.node || (events[0] && events[0].node);
-      apikey = body.apikey || (events[0] && events[0].apikey);
+      bodyNode = body.node || (events[0] && events[0].node);
     }
 
-    if (!node || !checkIngestAuth(node, apikey)) {
-      return res.status(401).json({ detail: 'Invalid API key' });
+    const node = resolveNodeFromRequest(req, bodyNode);
+    if (!node) {
+      return res.status(403).json({ detail: 'Node missing in token' });
+    }
+    if (node === '__forbidden__') {
+      return res.status(403).json({ detail: 'Node mismatch with token' });
     }
 
     const normalized = [];
@@ -443,10 +412,10 @@ async function startServer() {
     }
 
     appendJsonl(logsFile, normalized);
-    return res.json({ status: 'ok', received: normalized.length });
+    return res.json({ status: 'ok', node, received: normalized.length });
   });
 
-  app.post('/api/reverse/request', requireLogin, (req, res) => {
+  app.post('/api/reverse/request', ...requireAdmin, (req, res) => {
     const { node, reason } = req.body || {};
     if (typeof node !== 'string' || !node) {
       return res.status(400).json({ detail: 'node is required' });
@@ -465,21 +434,23 @@ async function startServer() {
     return res.json({ status: 'ok', node, requestId });
   });
 
-  app.get('/api/reverse/poll', (req, res) => {
-    const node = typeof req.query.node === 'string' ? req.query.node : '';
-    const apikey = typeof req.query.apikey === 'string' ? req.query.apikey : '';
-
-    if (!node || !checkIngestAuth(node, apikey)) {
-      return res.status(401).json({ detail: 'Invalid API key' });
+  app.get('/api/reverse/poll', requireAuth, (req, res) => {
+    const node = resolveNodeFromRequest(req, req.query.node);
+    if (!node) {
+      return res.status(403).json({ detail: 'Node missing in token' });
+    }
+    if (node === '__forbidden__') {
+      return res.status(403).json({ detail: 'Node mismatch with token' });
     }
 
     const reqState = reverseRequests[node];
     if (!reqState || reqState.status !== 'pending') {
-      return res.json({ status: 'ok', pending: false });
+      return res.json({ status: 'ok', node, pending: false });
     }
 
     return res.json({
       status: 'ok',
+      node,
       pending: true,
       request: {
         requestId: reqState.requestId,
@@ -489,15 +460,15 @@ async function startServer() {
     });
   });
 
-  app.post('/api/reverse/submit', async (req, res) => {
-    const { node, apikey, requestId, config } = req.body || {};
+  app.post('/api/reverse/submit', requireAuth, async (req, res) => {
+    const { node: bodyNode, requestId, config } = req.body || {};
 
-    if (typeof node !== 'string' || !node) {
-      return res.status(400).json({ detail: 'node is required' });
+    const node = resolveNodeFromRequest(req, bodyNode);
+    if (!node) {
+      return res.status(403).json({ detail: 'Node missing in token' });
     }
-
-    if (!checkIngestAuth(node, apikey)) {
-      return res.status(401).json({ detail: 'Invalid API key' });
+    if (node === '__forbidden__') {
+      return res.status(403).json({ detail: 'Node mismatch with token' });
     }
 
     const reqState = reverseRequests[node];
@@ -552,13 +523,10 @@ async function startServer() {
     persistReverse();
 
     console.log(`[REVERSE] node=${node} request=${requestId} submitted auto_applied=${applyResult.autoApplied}`);
-    return res.json({
-      status: 'ok',
-      apply: nftStore[node].apply,
-    });
+    return res.json({ status: 'ok', node, apply: nftStore[node].apply });
   });
 
-  app.get('/api/reverse/latest/:node', requireLogin, (req, res) => {
+  app.get('/api/reverse/latest/:node', ...requireAdmin, (req, res) => {
     const node = req.params.node;
     const data = nftStore[node];
     if (!data) {
@@ -567,7 +535,7 @@ async function startServer() {
     return res.json({ status: 'ok', node, data });
   });
 
-  app.get('/api/status', requireLogin, (req, res) => {
+  app.get('/api/status', ...requireAdmin, (req, res) => {
     const output = {};
     for (const [node, ips] of state.entries()) {
       output[node] = Array.from(ips).sort();
@@ -575,7 +543,7 @@ async function startServer() {
     return res.json(output);
   });
 
-  app.get('/api/status/:node', requireLogin, (req, res) => {
+  app.get('/api/status/:node', ...requireAdmin, (req, res) => {
     const node = req.params.node;
     if (!state.has(node)) {
       return res.status(404).json({ detail: 'Node not found' });
@@ -587,9 +555,6 @@ async function startServer() {
   app.listen(port, host, () => {
     console.log(`[INFO] Server listening on ${host}:${port}`);
     console.log(`[INFO] Accounts YAML: ${accountsPath}`);
-    if (!ingestApiKey && nodeApiKeys.size === 0) {
-      console.warn('[WARN] No ingest API key configured (INGEST_API_KEY / NODE_API_KEYS). Ingest endpoints will reject requests.');
-    }
     if (jwtSecret === 'change-me-now') {
       console.warn('[WARN] JWT_SECRET is default value. Change it in production.');
     }

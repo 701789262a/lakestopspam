@@ -30,12 +30,20 @@ function writeNumber(filePath, value) {
   fs.writeFileSync(filePath, String(value));
 }
 
-async function postJson(url, payload) {
-  return axios.post(url, payload, { timeout: 10000 });
-}
-
-async function getJson(url, params) {
-  return axios.get(url, { params, timeout: 10000 });
+function parseJwtExpMs(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      return Date.now() + (10 * 60 * 1000);
+    }
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (!payload.exp) {
+      return Date.now() + (10 * 60 * 1000);
+    }
+    return Number(payload.exp) * 1000;
+  } catch {
+    return Date.now() + (10 * 60 * 1000);
+  }
 }
 
 function parseNftSetOutput(raw) {
@@ -82,15 +90,10 @@ async function getBannedIps(nftFamily, nftTable, nftSet) {
   }
 }
 
-function buildChangePayload(node, apikey, added, removed) {
-  return { node, apikey, added, removed };
-}
-
 function buildEvent(node, type, ip, reason, ports) {
   return {
     ts: Math.floor(Date.now() / 1000),
     node,
-    apikey: process.env.API_KEY,
     type,
     ip,
     reason,
@@ -121,7 +124,7 @@ function loadJsonlLinesFromOffset(filePath, offset) {
       if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
         events.push(obj);
       }
-    } catch (err) {
+    } catch {
       console.warn('[WARN] Skipping invalid JSONL line');
     }
   }
@@ -157,11 +160,13 @@ async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd) {
 async function startClient() {
   const serverUrl = (process.env.SERVER_URL || '').replace(/\/$/, '');
   const node = process.env.NODE_NAME || '';
-  const apikey = process.env.API_KEY || '';
+  const username = process.env.CLIENT_USERNAME || '';
+  const password = process.env.CLIENT_PASSWORD || '';
 
   const intervalMs = Number(process.env.INTERVAL_MS || 10000);
   const logsPushMs = Number(process.env.LOG_PUSH_INTERVAL_MS || 10000);
   const reversePollMs = Number(process.env.REVERSE_POLL_INTERVAL_MS || 10000);
+  const jwtRefreshSkewMs = Number(process.env.JWT_REFRESH_SKEW_MS || 60000);
 
   const nftFamily = process.env.NFT_FAMILY || 'inet';
   const nftTable = process.env.NFT_TABLE || 'pve_smtp_guard';
@@ -171,21 +176,85 @@ async function startClient() {
   const packetLogFile = process.env.PACKET_LOG_FILE || path.join(process.cwd(), 'data', 'packet-events.jsonl');
   const packetLogOffsetFile = process.env.PACKET_LOG_OFFSET_FILE || path.join(process.cwd(), 'data', '.packet-log.offset');
 
-  if (!serverUrl || !node || !apikey) {
-    console.error('[FATAL] Missing SERVER_URL, NODE_NAME or API_KEY for client mode');
+  if (!serverUrl || !node || !username || !password) {
+    console.error('[FATAL] Missing SERVER_URL, NODE_NAME, CLIENT_USERNAME or CLIENT_PASSWORD for client mode');
     process.exit(1);
   }
 
+  const loginUrl = `${serverUrl}/api/login`;
   const changeUrl = `${serverUrl}/api/change`;
   const logsUrl = `${serverUrl}/api/logs`;
   const reversePollUrl = `${serverUrl}/api/reverse/poll`;
   const reverseSubmitUrl = `${serverUrl}/api/reverse/submit`;
 
-  console.log(`[INFO] Client mode started for node=${node}`);
+  console.log(`[INFO] Client mode started for node=${node}, user=${username}`);
 
   let previous = new Set();
   let firstRun = true;
   let packetOffset = readNumber(packetLogOffsetFile, 0);
+  let authToken = '';
+  let authTokenExpMs = 0;
+  let loginInFlight = null;
+
+  async function loginNow() {
+    const resp = await axios.post(loginUrl, { username, password }, { timeout: 10000 });
+    const token = resp.data && resp.data.token;
+    if (!token || typeof token !== 'string') {
+      throw new Error('Missing token in /api/login response');
+    }
+
+    authToken = token;
+    authTokenExpMs = parseJwtExpMs(token);
+    console.log('[AUTH] Login success');
+  }
+
+  async function ensureLoggedIn() {
+    const now = Date.now();
+    if (authToken && now < (authTokenExpMs - jwtRefreshSkewMs)) {
+      return;
+    }
+
+    if (loginInFlight) {
+      await loginInFlight;
+      return;
+    }
+
+    loginInFlight = loginNow()
+      .catch((err) => {
+        const status = err.response ? err.response.status : 'no_status';
+        throw new Error(`Login failed (${status})`);
+      })
+      .finally(() => {
+        loginInFlight = null;
+      });
+
+    await loginInFlight;
+  }
+
+  function authHeaders() {
+    return {
+      Authorization: `Bearer ${authToken}`,
+    };
+  }
+
+  async function postJson(url, payload) {
+    await ensureLoggedIn();
+    return axios.post(url, payload, {
+      timeout: 10000,
+      headers: authHeaders(),
+    });
+  }
+
+  async function getJson(url, params) {
+    await ensureLoggedIn();
+    return axios.get(url, {
+      params,
+      timeout: 10000,
+      headers: authHeaders(),
+    });
+  }
+
+  await ensureLoggedIn();
 
   async function monitorBanListLoop() {
     while (true) {
@@ -204,7 +273,7 @@ async function startClient() {
           console.log(`[CHANGE] +${added.length} added, -${removed.length} removed`);
 
           try {
-            await postJson(changeUrl, buildChangePayload(node, apikey, added, removed));
+            await postJson(changeUrl, { node, added, removed });
           } catch (err) {
             const status = err.response ? err.response.status : 'no_status';
             console.error(`[ERROR] Failed notifying /api/change (${status})`);
@@ -220,7 +289,7 @@ async function startClient() {
 
           if (events.length) {
             try {
-              await postJson(logsUrl, { node, apikey, events });
+              await postJson(logsUrl, { node, events });
             } catch (err) {
               const status = err.response ? err.response.status : 'no_status';
               console.error(`[ERROR] Failed sending ban events to /api/logs (${status})`);
@@ -248,11 +317,10 @@ async function startClient() {
           const normalized = events.map((evt) => ({
             ...evt,
             node: typeof evt.node === 'string' && evt.node ? evt.node : node,
-            apikey,
             ts: Number.isFinite(evt.ts) ? Number(evt.ts) : Math.floor(Date.now() / 1000),
           }));
 
-          await postJson(logsUrl, { node, apikey, events: normalized });
+          await postJson(logsUrl, { node, events: normalized });
           console.log(`[LOGS] sent ${normalized.length} packet events`);
         }
       } catch (err) {
@@ -267,7 +335,7 @@ async function startClient() {
   async function reversePollLoop() {
     while (true) {
       try {
-        const resp = await getJson(reversePollUrl, { node, apikey });
+        const resp = await getJson(reversePollUrl);
         const data = resp.data || {};
 
         if (data.pending && data.request && data.request.requestId) {
@@ -275,7 +343,6 @@ async function startClient() {
 
           await postJson(reverseSubmitUrl, {
             node,
-            apikey,
             requestId: data.request.requestId,
             config,
           });
