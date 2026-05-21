@@ -191,11 +191,11 @@ function extractRulesetFromConfig(config) {
   }
 
   if (config && typeof config === 'object') {
-    if (typeof config.ruleset === 'string' && config.ruleset.trim()) {
-      return config.ruleset;
-    }
     if (typeof config.nftablesConf === 'string' && config.nftablesConf.trim()) {
       return config.nftablesConf;
+    }
+    if (typeof config.ruleset === 'string' && config.ruleset.trim()) {
+      return config.ruleset;
     }
   }
 

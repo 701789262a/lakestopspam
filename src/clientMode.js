@@ -303,6 +303,7 @@ function loadJsonlLinesFromOffset(filePath, offset) {
 async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd, nftApplyPath) {
   let bannedSet = null;
   let ruleset = null;
+  let rulesetError = null;
   let nftablesConf = null;
   let nftablesConfSha256 = null;
 
@@ -317,7 +318,7 @@ async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd, nftA
     const { stdout } = await execAsync(nftRulesetCmd, { timeout: 10000 });
     ruleset = stdout;
   } catch (err) {
-    ruleset = `error: ${err.message}`;
+    rulesetError = err.message;
   }
 
   try {
@@ -334,6 +335,7 @@ async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd, nftA
     nftablesConfSha256,
     bannedSet,
     ruleset,
+    rulesetError,
   };
 }
 
