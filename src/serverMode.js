@@ -98,6 +98,17 @@ function normalizeEvent(input, fallbackNode) {
   return event;
 }
 
+function parsePositiveInt(value, fallback) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+}
+
 function extractRulesetFromConfig(config) {
   if (typeof config === 'string' && config.trim()) {
     return config;
@@ -413,6 +424,64 @@ async function startServer() {
 
     appendJsonl(logsFile, normalized);
     return res.json({ status: 'ok', node, received: normalized.length });
+  });
+
+  app.get('/api/logs', ...requireAdmin, (req, res) => {
+    const nodeFilter = typeof req.query.node === 'string' ? req.query.node : '';
+    const typeFilter = typeof req.query.type === 'string' ? req.query.type : '';
+    const fromTs = parsePositiveInt(req.query.fromTs, 0);
+    const toTs = parsePositiveInt(req.query.toTs, Number.MAX_SAFE_INTEGER);
+    const limitRaw = parsePositiveInt(req.query.limit, 200);
+    const limit = Math.min(Math.max(limitRaw, 1), 5000);
+
+    if (!fs.existsSync(logsFile)) {
+      return res.json({
+        status: 'ok',
+        total: 0,
+        logs: [],
+      });
+    }
+
+    const lines = fs.readFileSync(logsFile, 'utf8')
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+    const results = [];
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+          continue;
+        }
+
+        if (nodeFilter && obj.node !== nodeFilter) {
+          continue;
+        }
+        if (typeFilter && obj.type !== typeFilter) {
+          continue;
+        }
+
+        const ts = Number.isFinite(obj.ts) ? Number(obj.ts) : 0;
+        if (ts < fromTs || ts > toTs) {
+          continue;
+        }
+
+        results.push(obj);
+        if (results.length >= limit) {
+          break;
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+
+    results.reverse();
+    return res.json({
+      status: 'ok',
+      total: results.length,
+      logs: results,
+    });
   });
 
   app.post('/api/reverse/request', ...requireAdmin, (req, res) => {

@@ -13,3 +13,5 @@ data/.packet-log.offset
 *.tmp
 *.swp
 .DS_Store
+
+config/accounts.yml

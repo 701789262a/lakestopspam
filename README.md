@@ -19,7 +19,15 @@ cp .env.example .env
 
 ## 2) Config account YAML sul server
 
-File: `config/accounts.yml`
+Template: `config/accounts.example.yml`
+
+Sul server crea il file reale:
+
+```bash
+cp config/accounts.example.yml config/accounts.yml
+```
+
+File reale usato in runtime: `config/accounts.yml`
 
 Esempio:
 - account `admin` per API amministrative
@@ -56,6 +64,7 @@ Endpoint server:
 - `POST /api/login`
 - `POST /api/change` (JWT client)
 - `POST /api/logs` (JWT client)
+- `GET /api/logs` (JWT admin, query: `node`, `type`, `fromTs`, `toTs`, `limit`)
 - `GET /api/reverse/poll` (JWT client)
 - `POST /api/reverse/submit` (JWT client)
 - `POST /api/reverse/request` (JWT admin)
@@ -132,3 +141,19 @@ Il client:
 - Su `reverse/submit` il server prende `config.ruleset`, fa `nft -c -f`, poi scrive `NFT_APPLY_PATH` e fa `nft -f`.
 - Se l'apply fallisce, tenta rollback da backup `<NFT_APPLY_PATH>.bak-<timestamp>`.
 - Il processo server deve avere permessi per scrivere `NFT_APPLY_PATH` e lanciare `nft -f`.
+
+## Esempi API log (admin)
+
+Ultimi 100 eventi:
+
+```bash
+curl -H "Authorization: Bearer <ADMIN_JWT>" \
+  "http://127.0.0.1:8000/api/logs?limit=100"
+```
+
+Solo pacchetti di un nodo:
+
+```bash
+curl -H "Authorization: Bearer <ADMIN_JWT>" \
+  "http://127.0.0.1:8000/api/logs?node=node-1&type=packet&limit=200"
+```
