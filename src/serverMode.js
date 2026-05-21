@@ -143,6 +143,45 @@ function isStringArray(value) {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
+function isValidIpv4(value) {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const ip = value.trim();
+  const match = ip.match(/^(\d{1,3})(\.\d{1,3}){3}$/);
+  if (!match) {
+    return false;
+  }
+  const parts = ip.split('.');
+  return parts.every((part) => {
+    const n = Number(part);
+    return Number.isInteger(n) && n >= 0 && n <= 255;
+  });
+}
+
+function normalizeIpv4List(...parts) {
+  const out = [];
+  for (const part of parts) {
+    if (typeof part === 'string') {
+      const trimmed = part.trim();
+      if (trimmed) {
+        out.push(trimmed);
+      }
+      continue;
+    }
+    if (Array.isArray(part)) {
+      for (const item of part) {
+        if (typeof item === 'string' && item.trim()) {
+          out.push(item.trim());
+        }
+      }
+    }
+  }
+
+  const unique = Array.from(new Set(out));
+  return unique.filter(isValidIpv4);
+}
+
 function normalizeEvent(input, fallbackNode) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return null;
@@ -754,6 +793,56 @@ async function startServer() {
     });
   });
 
+  app.post('/api/unban', ...requireAdmin, (req, res) => {
+    const {
+      node,
+      ip,
+      ips,
+      reason,
+    } = req.body || {};
+
+    if (typeof node !== 'string' || !node.trim()) {
+      return res.status(400).json({ detail: 'node is required' });
+    }
+    const normalizedNode = node.trim();
+
+    const requestedIps = normalizeIpv4List(ip, ips);
+    if (!requestedIps.length) {
+      return res.status(400).json({ detail: 'ip or ips[] (valid IPv4) is required' });
+    }
+
+    const existing = reverseRequests[normalizedNode];
+    if (existing && existing.status === 'pending') {
+      return res.status(409).json({
+        detail: `Node ${normalizedNode} already has a pending request (${existing.type || 'unknown'})`,
+        requestId: existing.requestId,
+      });
+    }
+
+    const requestId = makeRequestId();
+    reverseRequests[normalizedNode] = {
+      requestId,
+      type: 'unban_ips',
+      requestedAt: new Date().toISOString(),
+      requestedBy: req.user.sub,
+      reason: typeof reason === 'string' && reason.trim() ? reason.trim() : 'admin_manual_unban',
+      status: 'pending',
+      unban: {
+        ips: requestedIps,
+      },
+    };
+    persistReverse();
+
+    return res.json({
+      status: 'ok',
+      node: normalizedNode,
+      requestId,
+      type: 'unban_ips',
+      queuedIps: requestedIps,
+      count: requestedIps.length,
+    });
+  });
+
   app.get('/api/reverse/poll', requireAuth, (req, res) => {
     const node = resolveNodeFromRequest(req, req.query.node);
     if (!node) {
@@ -778,6 +867,7 @@ async function startServer() {
         reason: reqState.reason,
         requestedAt: reqState.requestedAt,
         config: reqState.type === 'push_config' ? reqState.config : undefined,
+        unban: reqState.type === 'unban_ips' ? reqState.unban : undefined,
       },
     });
   });
@@ -865,8 +955,8 @@ async function startServer() {
     if (!reqState || reqState.requestId !== requestId) {
       return res.status(404).json({ detail: 'No matching pending request' });
     }
-    if (reqState.type !== 'push_config') {
-      return res.status(409).json({ detail: 'Request type mismatch: expected push_config' });
+    if (reqState.type !== 'push_config' && reqState.type !== 'unban_ips') {
+      return res.status(409).json({ detail: 'Request type mismatch: expected push_config or unban_ips' });
     }
 
     const success = Boolean(ok);
@@ -880,13 +970,43 @@ async function startServer() {
     persistReverse();
 
     if (success) {
-      return res.status(200).json({ status: 'ok', node, requestId });
+      if (reqState.type === 'unban_ips') {
+        const reqIps = normalizeIpv4List(reqState.unban && reqState.unban.ips);
+        const current = state.get(node) || new Set();
+        const removed = [];
+        for (const candidate of reqIps) {
+          if (current.delete(candidate)) {
+            removed.push(candidate);
+          }
+        }
+        state.set(node, current);
+        persistState();
+
+        if (removed.length) {
+          const nowTs = Math.floor(Date.now() / 1000);
+          const unbanEvents = removed.map((removedIp) => ({
+            ts: nowTs,
+            node,
+            type: 'unban',
+            ip: removedIp,
+            reason: 'admin_manual_unban_ack',
+            ports: [25, 465, 587],
+            payload: {
+              requestId,
+            },
+          }));
+          appendJsonl(logsFile, unbanEvents);
+          appendEventsCsv(logsCsvFile, unbanEvents);
+        }
+      }
+
+      return res.status(200).json({ status: 'ok', node, requestId, type: reqState.type });
     }
     return res.status(400).json({
       status: 'error',
       node,
       requestId,
-      detail: reqState.clientAck.error || 'Client reported config apply failure',
+      detail: reqState.clientAck.error || 'Client reported action failure',
     });
   });
 

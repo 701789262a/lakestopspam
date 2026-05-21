@@ -107,9 +107,13 @@ function parseNftSetOutput(raw) {
   return [];
 }
 
-async function getBannedIps(nftFamily, nftTable, nftSet) {
+async function getBannedIps(nftFamily, nftTable, nftSet, nftBinary = 'nft') {
   try {
-    const { stdout } = await execFileAsync('nft', ['-j', 'list', 'set', nftFamily, nftTable, nftSet], { timeout: 10000 });
+    const { stdout } = await execFileAsync(
+      nftBinary,
+      ['-j', 'list', 'set', nftFamily, nftTable, nftSet],
+      { timeout: 10000 }
+    );
     return parseNftSetOutput(stdout);
   } catch (err) {
     if (err.code === 'ENOENT') {
@@ -120,6 +124,71 @@ async function getBannedIps(nftFamily, nftTable, nftSet) {
     }
     return [];
   }
+}
+
+function isValidIpv4(value) {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const ip = value.trim();
+  if (!/^(\d{1,3})(\.\d{1,3}){3}$/.test(ip)) {
+    return false;
+  }
+  return ip.split('.').every((part) => {
+    const n = Number(part);
+    return Number.isInteger(n) && n >= 0 && n <= 255;
+  });
+}
+
+async function unbanIpsFromNftSet(requestedIps, options) {
+  const {
+    nftBinary,
+    nftFamily,
+    nftTable,
+    nftSet,
+    timeoutMs,
+  } = options;
+
+  const unique = Array.from(new Set(
+    (Array.isArray(requestedIps) ? requestedIps : [])
+      .filter((ip) => typeof ip === 'string')
+      .map((ip) => ip.trim())
+      .filter(isValidIpv4)
+  ));
+  if (!unique.length) {
+    return { requested: 0, removed: [], skipped: [], errors: [] };
+  }
+
+  const current = new Set(await getBannedIps(nftFamily, nftTable, nftSet, nftBinary));
+  const toRemove = unique.filter((ip) => current.has(ip));
+  const skipped = unique.filter((ip) => !current.has(ip));
+  const removed = [];
+  const errors = [];
+
+  for (const ip of toRemove) {
+    try {
+      await execFileAsync(
+        nftBinary,
+        ['delete', 'element', nftFamily, nftTable, nftSet, '{', ip, '}'],
+        { timeout: timeoutMs }
+      );
+      removed.push(ip);
+    } catch (err) {
+      const stderr = err.stderr ? String(err.stderr).trim() : err.message;
+      errors.push({ ip, error: stderr });
+    }
+  }
+
+  if (errors.length) {
+    throw new Error(`unban failed for ${errors.length} ip(s): ${errors.map((x) => `${x.ip}: ${x.error}`).join('; ')}`);
+  }
+
+  return {
+    requested: unique.length,
+    removed,
+    skipped,
+    errors,
+  };
 }
 
 function buildEvent(node, type, ip, reason, ports) {
@@ -540,7 +609,7 @@ async function startClient() {
 
   async function monitorBanListLoop() {
     while (true) {
-      const currentList = await getBannedIps(nftFamily, nftTable, nftSet);
+      const currentList = await getBannedIps(nftFamily, nftTable, nftSet, clientNftBin);
       const current = new Set(currentList);
 
       if (firstRun) {
@@ -708,6 +777,49 @@ async function startClient() {
                   error: err.message,
                 });
                 console.error(`[PUSH] Apply failed request=${data.request.requestId} ack_status=${ackResp.status} error=${err.message}`);
+              }
+            }
+          } else if (requestType === 'unban_ips') {
+            const unbanIps = data.request.unban && Array.isArray(data.request.unban.ips)
+              ? data.request.unban.ips
+              : [];
+
+            if (!unbanIps.length) {
+              const ackResp = await postJsonAnyStatus(configAckUrl, {
+                node,
+                requestId: data.request.requestId,
+                ok: false,
+                error: 'Missing unban.ips in unban_ips request',
+              });
+              console.error(`[UNBAN] Missing ips for request=${data.request.requestId} ack_status=${ackResp.status}`);
+            } else {
+              try {
+                const result = await unbanIpsFromNftSet(unbanIps, {
+                  nftBinary: clientNftBin,
+                  nftFamily,
+                  nftTable,
+                  nftSet,
+                  timeoutMs: clientNftCmdTimeoutMs,
+                });
+                const ackResp = await postJsonAnyStatus(configAckUrl, {
+                  node,
+                  requestId: data.request.requestId,
+                  ok: true,
+                  details: result,
+                });
+                if (ackResp.status === 200) {
+                  console.log(`[UNBAN] Applied unban request=${data.request.requestId} removed=${result.removed.length} skipped=${result.skipped.length}`);
+                } else {
+                  console.error(`[UNBAN] Unexpected ack status=${ackResp.status} request=${data.request.requestId}`);
+                }
+              } catch (err) {
+                const ackResp = await postJsonAnyStatus(configAckUrl, {
+                  node,
+                  requestId: data.request.requestId,
+                  ok: false,
+                  error: err.message,
+                });
+                console.error(`[UNBAN] Apply failed request=${data.request.requestId} ack_status=${ackResp.status} error=${err.message}`);
               }
             }
           } else {

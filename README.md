@@ -71,7 +71,8 @@ Endpoint server:
 - `POST /api/reverse/request` (JWT admin)
 - `POST /api/reverse/refresh` (JWT admin: richiede al client snapshot della conf attuale da file)
 - `POST /api/config/push` (JWT admin: push config nft ai client via poll)
-- `POST /api/config/ack` (JWT client: ack esito apply config push)
+- `POST /api/unban` (JWT admin: richiede unban IP su nodo via poll client)
+- `POST /api/config/ack` (JWT client: ack esito azioni push/unban)
 - `GET /api/reverse/latest/:node` (JWT admin, auto-refresh del nodo; `202` se snapshot non ancora disponibile)
 - `GET /api/reverse/latest` (JWT admin, auto-refresh di tutti i nodi noti)
 - `GET /api/status` (JWT admin)
@@ -108,6 +109,7 @@ Il client:
 - invia eventi ban/unban e packet logs a `/api/logs`
 - legge i log kernel `SMTP-GUARD` da `journalctl -k` (con cursore persistente locale)
 - quando riceve `push_config` dal poll: valida ruleset (`nft -c -f`), scrive `CLIENT_NFT_APPLY_PATH`, applica (`nft -f`) e manda ack al server
+- quando riceve `unban_ips` dal poll: rimuove gli IP dal set nft e manda ack al server
 - polla `/api/reverse/poll` e, se richiesto, invia conf nft a `/api/reverse/submit` leggendo il file corrente `CLIENT_NFT_APPLY_PATH`
 
 ## 5) Payload supportati
@@ -185,6 +187,19 @@ curl -X POST http://127.0.0.1:8000/api/config/push \
     "node": "node-1",
     "reason": "manual rollout",
     "ruleset": "table inet pve_smtp_guard { set banned_v4 { type ipv4_addr; } }"
+  }'
+```
+
+Accodare unban su un nodo:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/unban \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "node": "node-1",
+    "ips": ["1.2.3.4", "5.6.7.8"],
+    "reason": "manual unblock"
   }'
 ```
 
