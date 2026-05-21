@@ -70,6 +70,8 @@ Endpoint server:
 - `GET /api/reverse/poll` (JWT client)
 - `POST /api/reverse/submit` (JWT client)
 - `POST /api/reverse/request` (JWT admin)
+- `POST /api/config/push` (JWT admin: push config nft ai client via poll)
+- `POST /api/config/ack` (JWT client: ack esito apply config push)
 - `GET /api/reverse/latest/:node` (JWT admin)
 - `GET /api/status` (JWT admin)
 - `GET /api/status/:node` (JWT admin)
@@ -104,6 +106,7 @@ Il client:
 - invia delta ban a `/api/change`
 - invia eventi ban/unban e packet logs a `/api/logs`
 - legge i log kernel `SMTP-GUARD` da `journalctl -k` (con cursore persistente locale)
+- quando riceve `push_config` dal poll: valida ruleset (`nft -c -f`), scrive `CLIENT_NFT_APPLY_PATH`, applica (`nft -f`) e manda ack al server
 - polla `/api/reverse/poll` e, se richiesto, invia conf nft a `/api/reverse/submit`
 
 ## 5) Payload supportati
@@ -169,4 +172,17 @@ Solo pacchetti `BAN`:
 ```bash
 curl -H "Authorization: Bearer <ADMIN_JWT>" \
   "http://127.0.0.1:8000/api/packets?node=node-1&action=ban&limit=200"
+```
+
+Push config a un client:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/config/push \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "node": "node-1",
+    "reason": "manual rollout",
+    "ruleset": "table inet pve_smtp_guard { set banned_v4 { type ipv4_addr; } }"
+  }'
 ```

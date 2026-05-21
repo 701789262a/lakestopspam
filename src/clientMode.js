@@ -1,4 +1,5 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFile, exec } = require('child_process');
 const { promisify } = require('util');
@@ -323,6 +324,63 @@ async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd) {
   };
 }
 
+async function validateAndApplyLocalNftRuleset(ruleset, options) {
+  const {
+    nftBinary,
+    nftApplyPath,
+    timeoutMs,
+  } = options;
+
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const tempFile = path.join(os.tmpdir(), `lakestopspam-client-${stamp}.conf`);
+  const backupFile = `${nftApplyPath}.bak-${stamp}`;
+
+  fs.mkdirSync(path.dirname(nftApplyPath), { recursive: true });
+  fs.writeFileSync(tempFile, ruleset, { mode: 0o600 });
+
+  try {
+    await execFileAsync(nftBinary, ['-c', '-f', tempFile], { timeout: timeoutMs });
+  } catch (err) {
+    const stderr = err.stderr ? String(err.stderr).trim() : err.message;
+    throw new Error(`nft validation failed: ${stderr}`);
+  } finally {
+    try {
+      fs.unlinkSync(tempFile);
+    } catch {
+      // ignore cleanup error
+    }
+  }
+
+  const hadExistingTarget = fs.existsSync(nftApplyPath);
+  if (hadExistingTarget) {
+    fs.copyFileSync(nftApplyPath, backupFile);
+  }
+
+  fs.writeFileSync(nftApplyPath, ruleset);
+
+  try {
+    await execFileAsync(nftBinary, ['-f', nftApplyPath], { timeout: timeoutMs });
+  } catch (err) {
+    const stderr = err.stderr ? String(err.stderr).trim() : err.message;
+    let rollback = 'not_attempted';
+    if (hadExistingTarget && fs.existsSync(backupFile)) {
+      try {
+        fs.copyFileSync(backupFile, nftApplyPath);
+        await execFileAsync(nftBinary, ['-f', nftApplyPath], { timeout: timeoutMs });
+        rollback = 'restored_previous_config';
+      } catch (rollbackErr) {
+        rollback = `rollback_failed: ${rollbackErr.message}`;
+      }
+    }
+    throw new Error(`nft apply failed: ${stderr}; rollback=${rollback}`);
+  }
+
+  return {
+    nftApplyPath,
+    backupFile: hadExistingTarget ? backupFile : null,
+  };
+}
+
 async function startClient() {
   const serverUrl = (process.env.SERVER_URL || '').replace(/\/$/, '');
   const node = process.env.NODE_NAME || '';
@@ -338,6 +396,9 @@ async function startClient() {
   const nftTable = process.env.NFT_TABLE || 'pve_smtp_guard';
   const nftSet = process.env.NFT_SET || 'banned_v4';
   const nftRulesetCmd = process.env.NFT_RULESET_CMD || 'nft list ruleset';
+  const clientNftApplyPath = process.env.CLIENT_NFT_APPLY_PATH || '/etc/nftables.conf';
+  const clientNftBin = process.env.CLIENT_NFT_BIN || 'nft';
+  const clientNftCmdTimeoutMs = Number(process.env.CLIENT_NFT_CMD_TIMEOUT_MS || 10000);
 
   const packetSource = (process.env.PACKET_SOURCE || 'journal').trim().toLowerCase();
   const packetLogFile = process.env.PACKET_LOG_FILE || path.join(process.cwd(), 'data', 'packet-events.jsonl');
@@ -360,6 +421,7 @@ async function startClient() {
   const logsUrl = `${serverUrl}/api/logs`;
   const reversePollUrl = `${serverUrl}/api/reverse/poll`;
   const reverseSubmitUrl = `${serverUrl}/api/reverse/submit`;
+  const configAckUrl = `${serverUrl}/api/config/ack`;
 
   console.log(`[INFO] Client mode started for node=${node}, user=${username}, packet_source=${packetSource}`);
 
@@ -416,6 +478,15 @@ async function startClient() {
     return axios.post(url, payload, {
       timeout: 10000,
       headers: authHeaders(),
+    });
+  }
+
+  async function postJsonAnyStatus(url, payload) {
+    await ensureLoggedIn();
+    return axios.post(url, payload, {
+      timeout: 10000,
+      headers: authHeaders(),
+      validateStatus: () => true,
     });
   }
 
@@ -536,15 +607,60 @@ async function startClient() {
         const data = resp.data || {};
 
         if (data.pending && data.request && data.request.requestId) {
-          const config = await collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd);
+          const requestType = typeof data.request.type === 'string' ? data.request.type : 'collect_config';
 
-          await postJson(reverseSubmitUrl, {
-            node,
-            requestId: data.request.requestId,
-            config,
-          });
+          if (requestType === 'push_config') {
+            const pushedRuleset = data.request.config && typeof data.request.config.ruleset === 'string'
+              ? data.request.config.ruleset
+              : '';
 
-          console.log(`[REVERSE] submitted config for request=${data.request.requestId}`);
+            if (!pushedRuleset.trim()) {
+              const ackResp = await postJsonAnyStatus(configAckUrl, {
+                node,
+                requestId: data.request.requestId,
+                ok: false,
+                error: 'Missing ruleset in push_config request',
+              });
+              console.error(`[PUSH] Missing ruleset for request=${data.request.requestId} ack_status=${ackResp.status}`);
+            } else {
+              try {
+                const apply = await validateAndApplyLocalNftRuleset(pushedRuleset, {
+                  nftBinary: clientNftBin,
+                  nftApplyPath: clientNftApplyPath,
+                  timeoutMs: clientNftCmdTimeoutMs,
+                });
+                const ackResp = await postJsonAnyStatus(configAckUrl, {
+                  node,
+                  requestId: data.request.requestId,
+                  ok: true,
+                  details: apply,
+                });
+                if (ackResp.status === 200) {
+                  console.log(`[PUSH] Applied config request=${data.request.requestId}`);
+                } else {
+                  console.error(`[PUSH] Unexpected ack status=${ackResp.status} request=${data.request.requestId}`);
+                }
+              } catch (err) {
+                const ackResp = await postJsonAnyStatus(configAckUrl, {
+                  node,
+                  requestId: data.request.requestId,
+                  ok: false,
+                  error: err.message,
+                });
+                console.error(`[PUSH] Apply failed request=${data.request.requestId} ack_status=${ackResp.status} error=${err.message}`);
+              }
+            }
+          } else {
+            const config = await collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd);
+
+            await postJson(reverseSubmitUrl, {
+              node,
+              requestId: data.request.requestId,
+              config,
+            });
+
+            console.log(`[REVERSE] submitted config for request=${data.request.requestId}`);
+          }
         }
       } catch (err) {
         const status = err.response ? err.response.status : 'no_status';

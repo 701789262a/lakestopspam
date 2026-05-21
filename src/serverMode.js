@@ -327,6 +327,10 @@ function buildBanMessage(node, added, removed, currentSet) {
   return lines.join(' ');
 }
 
+function makeRequestId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 async function startServer() {
   const host = process.env.HOST || '0.0.0.0';
   const port = Number(process.env.PORT || 8000);
@@ -624,9 +628,10 @@ async function startServer() {
       return res.status(400).json({ detail: 'node is required' });
     }
 
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const requestId = makeRequestId();
     reverseRequests[node] = {
       requestId,
+      type: 'collect_config',
       requestedAt: new Date().toISOString(),
       requestedBy: req.user.sub,
       reason: typeof reason === 'string' ? reason : 'manual',
@@ -635,6 +640,62 @@ async function startServer() {
     persistReverse();
 
     return res.json({ status: 'ok', node, requestId });
+  });
+
+  app.post('/api/config/push', ...requireAdmin, (req, res) => {
+    const {
+      node,
+      nodes,
+      ruleset,
+      reason,
+    } = req.body || {};
+
+    const normalizedRuleset = typeof ruleset === 'string' ? ruleset.trim() : '';
+    if (!normalizedRuleset) {
+      return res.status(400).json({ detail: 'ruleset is required' });
+    }
+
+    let targetNodes = [];
+    if (typeof node === 'string' && node.trim()) {
+      targetNodes = [node.trim()];
+    } else if (Array.isArray(nodes)) {
+      targetNodes = nodes
+        .filter((x) => typeof x === 'string')
+        .map((x) => x.trim())
+        .filter(Boolean);
+    }
+
+    if (!targetNodes.length) {
+      return res.status(400).json({ detail: 'node or nodes[] is required' });
+    }
+
+    targetNodes = Array.from(new Set(targetNodes));
+    const queued = [];
+    for (const targetNode of targetNodes) {
+      const requestId = makeRequestId();
+      reverseRequests[targetNode] = {
+        requestId,
+        type: 'push_config',
+        requestedAt: new Date().toISOString(),
+        requestedBy: req.user.sub,
+        reason: typeof reason === 'string' ? reason : 'push_config',
+        status: 'pending',
+        config: {
+          ruleset: normalizedRuleset,
+        },
+      };
+      queued.push({
+        node: targetNode,
+        requestId,
+      });
+    }
+    persistReverse();
+
+    return res.json({
+      status: 'ok',
+      queued,
+      count: queued.length,
+    });
   });
 
   app.get('/api/reverse/poll', requireAuth, (req, res) => {
@@ -657,8 +718,10 @@ async function startServer() {
       pending: true,
       request: {
         requestId: reqState.requestId,
+        type: reqState.type || 'collect_config',
         reason: reqState.reason,
         requestedAt: reqState.requestedAt,
+        config: reqState.type === 'push_config' ? reqState.config : undefined,
       },
     });
   });
@@ -677,6 +740,9 @@ async function startServer() {
     const reqState = reverseRequests[node];
     if (!reqState || reqState.requestId !== requestId) {
       return res.status(404).json({ detail: 'No matching pending request' });
+    }
+    if (reqState.type && reqState.type !== 'collect_config') {
+      return res.status(409).json({ detail: 'Request type mismatch: expected collect_config' });
     }
 
     const ruleset = extractRulesetFromConfig(config);
@@ -727,6 +793,52 @@ async function startServer() {
 
     console.log(`[REVERSE] node=${node} request=${requestId} submitted auto_applied=${applyResult.autoApplied}`);
     return res.json({ status: 'ok', node, apply: nftStore[node].apply });
+  });
+
+  app.post('/api/config/ack', requireAuth, (req, res) => {
+    const {
+      node: bodyNode,
+      requestId,
+      ok,
+      error,
+      details,
+    } = req.body || {};
+
+    const node = resolveNodeFromRequest(req, bodyNode);
+    if (!node) {
+      return res.status(403).json({ detail: 'Node missing in token' });
+    }
+    if (node === '__forbidden__') {
+      return res.status(403).json({ detail: 'Node mismatch with token' });
+    }
+
+    const reqState = reverseRequests[node];
+    if (!reqState || reqState.requestId !== requestId) {
+      return res.status(404).json({ detail: 'No matching pending request' });
+    }
+    if (reqState.type !== 'push_config') {
+      return res.status(409).json({ detail: 'Request type mismatch: expected push_config' });
+    }
+
+    const success = Boolean(ok);
+    reqState.status = success ? 'completed' : 'failed';
+    reqState.completedAt = new Date().toISOString();
+    reqState.clientAck = {
+      ok: success,
+      error: typeof error === 'string' ? error : undefined,
+      details: details && typeof details === 'object' ? details : undefined,
+    };
+    persistReverse();
+
+    if (success) {
+      return res.status(200).json({ status: 'ok', node, requestId });
+    }
+    return res.status(400).json({
+      status: 'error',
+      node,
+      requestId,
+      detail: reqState.clientAck.error || 'Client reported config apply failure',
+    });
   });
 
   app.get('/api/reverse/latest/:node', ...requireAdmin, (req, res) => {
