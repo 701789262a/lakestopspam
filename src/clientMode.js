@@ -222,8 +222,18 @@ async function collectJournalPacketEvents(options) {
     });
     stdout = result.stdout || '';
   } catch (err) {
-    const msg = err.stderr ? String(err.stderr).trim() : err.message;
-    throw new Error(`journalctl read failed: ${msg}`);
+    const exitCode = typeof err.code === 'number' ? err.code : null;
+    const stderr = err.stderr ? String(err.stderr).trim() : '';
+    const errStdout = err.stdout ? String(err.stdout) : '';
+
+    // journalctl can return exit code 1 when no lines match --grep/--after-cursor.
+    // Treat this as "no new events", not as a hard error.
+    if (exitCode === 1 && !stderr) {
+      stdout = errStdout;
+    } else {
+      const msg = stderr || err.message;
+      throw new Error(`journalctl read failed: ${msg}`);
+    }
   }
 
   if (!stdout.trim()) {
@@ -511,7 +521,8 @@ async function startClient() {
         }
       } catch (err) {
         const status = err.response ? err.response.status : 'no_status';
-        console.error(`[ERROR] Packet log push failed (${status})`);
+        const detail = err.response ? '' : `: ${err.message}`;
+        console.error(`[ERROR] Packet log push failed (${status})${detail}`);
       }
 
       await sleep(logsPushMs);
