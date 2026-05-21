@@ -306,6 +306,7 @@ async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd, nftA
   let rulesetError = null;
   let nftablesConf = null;
   let nftablesConfSha256 = null;
+  let nftablesConfError = null;
 
   try {
     const { stdout } = await execFileAsync('nft', ['-j', 'list', 'set', nftFamily, nftTable, nftSet], { timeout: 10000 });
@@ -325,7 +326,7 @@ async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd, nftA
     nftablesConf = fs.readFileSync(nftApplyPath, 'utf8');
     nftablesConfSha256 = crypto.createHash('sha256').update(nftablesConf).digest('hex');
   } catch (err) {
-    nftablesConf = `error: ${err.message}`;
+    nftablesConfError = err.message;
   }
 
   return {
@@ -333,6 +334,7 @@ async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd, nftA
     nftApplyPath,
     nftablesConf,
     nftablesConfSha256,
+    nftablesConfError,
     bannedSet,
     ruleset,
     rulesetError,
@@ -685,7 +687,10 @@ async function startClient() {
         }
       } catch (err) {
         const status = err.response ? err.response.status : 'no_status';
-        console.error(`[ERROR] Reverse poll failed (${status})`);
+        const detail = err.response && err.response.data
+          ? ` ${JSON.stringify(err.response.data)}`
+          : ` ${err.message}`;
+        console.error(`[ERROR] Reverse poll failed (${status})${detail}`);
       }
 
       await sleep(reversePollMs);

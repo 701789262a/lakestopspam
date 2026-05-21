@@ -200,4 +200,7 @@ curl -H "Authorization: Bearer <ADMIN_JWT>" \
   http://127.0.0.1:8000/api/reverse/latest/node-1
 ```
 
-Nota: ogni chiamata a `GET /api/reverse/latest` e `GET /api/reverse/latest/:node` accoda automaticamente una richiesta di refresh (`collect_config`) ai client.
+Nota: ogni chiamata a `GET /api/reverse/latest` e `GET /api/reverse/latest/:node` accoda automaticamente una richiesta di refresh (`collect_config`) ai client e attende la risposta.
+Timeout attesa configurabile sul server:
+- `REVERSE_REFRESH_WAIT_MS` (default `20000`)
+- `REVERSE_REFRESH_POLL_MS` (default `500`)

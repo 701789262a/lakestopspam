@@ -300,6 +300,10 @@ function makeRequestId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function startServer() {
   const host = process.env.HOST || '0.0.0.0';
   const port = Number(process.env.PORT || 8000);
@@ -316,6 +320,8 @@ async function startServer() {
   const validateRulesetOnServer = parseBoolean(process.env.VALIDATE_RULESET_ON_SERVER, true);
   const nftBinary = process.env.NFT_BIN || 'nft';
   const nftCmdTimeoutMs = Number(process.env.NFT_CMD_TIMEOUT_MS || 10000);
+  const reverseRefreshWaitMs = parsePositiveInt(process.env.REVERSE_REFRESH_WAIT_MS, 20000);
+  const reverseRefreshPollMs = Math.max(100, parsePositiveInt(process.env.REVERSE_REFRESH_POLL_MS, 500));
 
   const stateRaw = readJsonFile(stateFile, {});
   const state = new Map(Object.entries(stateRaw).map(([node, ips]) => [node, new Set(Array.isArray(ips) ? ips : [])]));
@@ -351,6 +357,16 @@ async function startServer() {
   function queueCollectConfigRequest(node, requestedBy, reason) {
     const existing = reverseRequests[node];
     if (existing && existing.status === 'pending') {
+      if (existing.type !== 'collect_config') {
+        return {
+          queued: false,
+          blocked: true,
+          node,
+          requestId: existing.requestId,
+          type: existing.type || 'unknown',
+          status: existing.status,
+        };
+      }
       return {
         queued: false,
         node,
@@ -376,6 +392,32 @@ async function startServer() {
       requestId,
       type: 'collect_config',
       status: 'pending',
+    };
+  }
+
+  async function waitForCollectCompletion(node, requestId, timeoutMs, pollMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const current = reverseRequests[node];
+      if (!current) {
+        return { ok: false, reason: 'missing_request' };
+      }
+      if (current.requestId !== requestId) {
+        return { ok: false, reason: 'request_replaced', current };
+      }
+      if (current.status === 'completed') {
+        return { ok: true, current };
+      }
+      if (current.status === 'failed') {
+        return { ok: false, reason: 'failed', current };
+      }
+      await sleep(pollMs);
+    }
+
+    return {
+      ok: false,
+      reason: 'timeout',
+      current: reverseRequests[node],
     };
   }
 
@@ -848,22 +890,51 @@ async function startServer() {
     });
   });
 
-  app.get('/api/reverse/latest/:node', ...requireAdmin, (req, res) => {
+  app.get('/api/reverse/latest/:node', ...requireAdmin, async (req, res) => {
     const node = req.params.node;
     const refresh = queueCollectConfigRequest(node, req.user.sub, 'auto_refresh_latest_single');
+    if (refresh.blocked) {
+      return res.status(409).json({
+        status: 'error',
+        node,
+        detail: `Pending non-collect request blocks refresh (${refresh.type}).`,
+        refresh,
+      });
+    }
+
+    const waited = await waitForCollectCompletion(
+      node,
+      refresh.requestId,
+      reverseRefreshWaitMs,
+      reverseRefreshPollMs
+    );
+
+    if (!waited.ok) {
+      const data = nftStore[node];
+      const httpStatus = waited.reason === 'failed' ? 400 : 504;
+      return res.status(httpStatus).json({
+        status: 'error',
+        node,
+        detail: waited.reason === 'failed' ? 'Client reported refresh failure' : 'Timed out waiting for client refresh',
+        refresh,
+        request: waited.current || null,
+        data: data || null,
+      });
+    }
+
     const data = nftStore[node];
     if (!data) {
-      return res.status(202).json({
-        status: 'pending',
+      return res.status(404).json({
+        status: 'error',
         node,
-        detail: 'No config snapshot yet; refresh queued.',
+        detail: 'Refresh completed but no snapshot stored for node',
         refresh,
       });
     }
     return res.json({ status: 'ok', node, data, refresh });
   });
 
-  app.get('/api/reverse/latest', ...requireAdmin, (req, res) => {
+  app.get('/api/reverse/latest', ...requireAdmin, async (req, res) => {
     const latestAccounts = loadAccounts(accountsPath);
     const knownNodes = new Set([
       ...Object.keys(nftStore),
@@ -878,8 +949,17 @@ async function startServer() {
     }
 
     const refresh = [];
+    const waits = [];
     for (const node of knownNodes) {
-      refresh.push(queueCollectConfigRequest(node, req.user.sub, 'auto_refresh_latest_all'));
+      const q = queueCollectConfigRequest(node, req.user.sub, 'auto_refresh_latest_all');
+      refresh.push(q);
+      if (!q.blocked) {
+        waits.push(waitForCollectCompletion(node, q.requestId, reverseRefreshWaitMs, reverseRefreshPollMs));
+      }
+    }
+
+    if (waits.length) {
+      await Promise.all(waits);
     }
 
     const output = {};
