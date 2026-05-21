@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const { execFile, exec } = require('child_process');
 const { promisify } = require('util');
+const crypto = require('crypto');
 
 const axios = require('axios');
 
@@ -299,9 +300,11 @@ function loadJsonlLinesFromOffset(filePath, offset) {
   return { nextOffset, events };
 }
 
-async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd) {
+async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd, nftApplyPath) {
   let bannedSet = null;
   let ruleset = null;
+  let nftablesConf = null;
+  let nftablesConfSha256 = null;
 
   try {
     const { stdout } = await execFileAsync('nft', ['-j', 'list', 'set', nftFamily, nftTable, nftSet], { timeout: 10000 });
@@ -317,8 +320,18 @@ async function collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd) {
     ruleset = `error: ${err.message}`;
   }
 
+  try {
+    nftablesConf = fs.readFileSync(nftApplyPath, 'utf8');
+    nftablesConfSha256 = crypto.createHash('sha256').update(nftablesConf).digest('hex');
+  } catch (err) {
+    nftablesConf = `error: ${err.message}`;
+  }
+
   return {
     collectedAt: new Date().toISOString(),
+    nftApplyPath,
+    nftablesConf,
+    nftablesConfSha256,
     bannedSet,
     ruleset,
   };
@@ -651,7 +664,13 @@ async function startClient() {
               }
             }
           } else {
-            const config = await collectNftConfig(nftFamily, nftTable, nftSet, nftRulesetCmd);
+            const config = await collectNftConfig(
+              nftFamily,
+              nftTable,
+              nftSet,
+              nftRulesetCmd,
+              clientNftApplyPath,
+            );
 
             await postJson(reverseSubmitUrl, {
               node,

@@ -70,6 +70,7 @@ Endpoint server:
 - `GET /api/reverse/poll` (JWT client)
 - `POST /api/reverse/submit` (JWT client)
 - `POST /api/reverse/request` (JWT admin)
+- `POST /api/reverse/refresh` (JWT admin: richiede al client snapshot della conf attuale da file)
 - `POST /api/config/push` (JWT admin: push config nft ai client via poll)
 - `POST /api/config/ack` (JWT client: ack esito apply config push)
 - `GET /api/reverse/latest/:node` (JWT admin)
@@ -108,7 +109,7 @@ Il client:
 - invia eventi ban/unban e packet logs a `/api/logs`
 - legge i log kernel `SMTP-GUARD` da `journalctl -k` (con cursore persistente locale)
 - quando riceve `push_config` dal poll: valida ruleset (`nft -c -f`), scrive `CLIENT_NFT_APPLY_PATH`, applica (`nft -f`) e manda ack al server
-- polla `/api/reverse/poll` e, se richiesto, invia conf nft a `/api/reverse/submit`
+- polla `/api/reverse/poll` e, se richiesto, invia conf nft a `/api/reverse/submit` leggendo il file corrente `CLIENT_NFT_APPLY_PATH`
 
 ## 5) Payload supportati
 
@@ -151,6 +152,8 @@ Il client:
 - Il processo server deve avere permessi per scrivere `NFT_APPLY_PATH` e lanciare `nft -f`.
 - I log eventi sono salvati su `LOGS_FILE` (JSONL) e `LOGS_CSV_FILE` (CSV).
 - Con `PACKET_SOURCE=file`, il client puo' troncare il file locale con `PACKET_LOG_TRUNCATE_AFTER_SEND=true`.
+- `POST /api/reverse/refresh` acquisisce la conf attuale dal file client (`CLIENT_NFT_APPLY_PATH`) e la salva lato server.
+- Per default il server non applica localmente la conf raccolta dal client (`APPLY_COLLECTED_CONFIG_ON_SERVER=false`).
 
 ## Esempi API log (admin)
 
@@ -186,4 +189,16 @@ curl -X POST http://127.0.0.1:8000/api/config/push \
     "reason": "manual rollout",
     "ruleset": "table inet pve_smtp_guard { set banned_v4 { type ipv4_addr; } }"
   }'
+```
+
+Richiedere al client la conf attuale dal file (`CLIENT_NFT_APPLY_PATH`) e poi leggerla:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/reverse/refresh \
+  -H "Authorization: Bearer <ADMIN_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{"node":"node-1"}'
+
+curl -H "Authorization: Bearer <ADMIN_JWT>" \
+  http://127.0.0.1:8000/api/reverse/latest/node-1
 ```

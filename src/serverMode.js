@@ -345,6 +345,7 @@ async function startServer() {
   const logsFile = process.env.LOGS_FILE || path.join(process.cwd(), 'data', 'events.jsonl');
   const logsCsvFile = process.env.LOGS_CSV_FILE || path.join(process.cwd(), 'data', 'events.csv');
   const autoApplyNftOnSubmit = parseBoolean(process.env.AUTO_APPLY_NFT_ON_SUBMIT, true);
+  const applyCollectedConfigOnServer = parseBoolean(process.env.APPLY_COLLECTED_CONFIG_ON_SERVER, false);
   const nftApplyPath = process.env.NFT_APPLY_PATH || '/etc/nftables.conf';
   const nftBinary = process.env.NFT_BIN || 'nft';
   const nftCmdTimeoutMs = Number(process.env.NFT_CMD_TIMEOUT_MS || 10000);
@@ -642,6 +643,26 @@ async function startServer() {
     return res.json({ status: 'ok', node, requestId });
   });
 
+  app.post('/api/reverse/refresh', ...requireAdmin, (req, res) => {
+    const { node, reason } = req.body || {};
+    if (typeof node !== 'string' || !node) {
+      return res.status(400).json({ detail: 'node is required' });
+    }
+
+    const requestId = makeRequestId();
+    reverseRequests[node] = {
+      requestId,
+      type: 'collect_config',
+      requestedAt: new Date().toISOString(),
+      requestedBy: req.user.sub,
+      reason: typeof reason === 'string' ? reason : 'refresh_current_file',
+      status: 'pending',
+    };
+    persistReverse();
+
+    return res.json({ status: 'ok', node, requestId, action: 'refresh_current_file' });
+  });
+
   app.post('/api/config/push', ...requireAdmin, (req, res) => {
     const {
       node,
@@ -756,7 +777,8 @@ async function startServer() {
       backupFile: null,
     };
 
-    if (autoApplyNftOnSubmit) {
+    const shouldApplyOnServer = autoApplyNftOnSubmit && applyCollectedConfigOnServer;
+    if (shouldApplyOnServer) {
       try {
         applyResult = {
           autoApplied: true,
@@ -884,6 +906,7 @@ async function startServer() {
     console.log(`[INFO] Reverse submit auto-apply nft: ${autoApplyNftOnSubmit ? 'enabled' : 'disabled'}`);
     if (autoApplyNftOnSubmit) {
       console.log(`[INFO] nft apply target: ${nftApplyPath}`);
+      console.log(`[INFO] apply collected client config on server: ${applyCollectedConfigOnServer ? 'enabled' : 'disabled'}`);
     }
   });
 }
