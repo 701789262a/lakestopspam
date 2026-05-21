@@ -221,9 +221,20 @@ function toInt(value) {
   return Math.floor(num);
 }
 
+function chunkArray(items, size) {
+  const out = [];
+  if (!Array.isArray(items) || size <= 0) {
+    return out;
+  }
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
 function parseSmtpGuardEventFromJournal(entry, node) {
   const message = entry && typeof entry.MESSAGE === 'string' ? entry.MESSAGE : '';
-  if (!message.includes('SMTP-GUARD ')) {
+  if (!message.includes('SMTP-GUARD')) {
     return null;
   }
 
@@ -273,6 +284,7 @@ async function collectJournalPacketEvents(options) {
   const {
     journalctlBin,
     journalGrep,
+    journalUseGrep = false,
     journalCursorFile,
     journalBatchLimit,
     journalTimeoutMs,
@@ -281,7 +293,10 @@ async function collectJournalPacketEvents(options) {
   } = options;
 
   const cursor = readText(journalCursorFile, '');
-  const args = ['-k', '--no-pager', '-o', 'json', '--grep', journalGrep, '-n', String(journalBatchLimit)];
+  const args = ['-k', '--no-pager', '-o', 'json', '-n', String(journalBatchLimit)];
+  if (journalUseGrep && journalGrep) {
+    args.push('--grep', journalGrep);
+  }
   if (cursor) {
     args.push('--after-cursor', cursor);
   }
@@ -302,6 +317,15 @@ async function collectJournalPacketEvents(options) {
     // Treat this as "no new events", not as a hard error.
     if (exitCode === 1 && !stderr) {
       stdout = errStdout;
+    } else if (
+      journalUseGrep
+      && /unknown option|unrecognized option|--grep/i.test(stderr)
+    ) {
+      // Fallback for systems with old journalctl lacking --grep support.
+      return collectJournalPacketEvents({
+        ...options,
+        journalUseGrep: false,
+      });
     } else if (
       exitCode === 1
       && cursor
@@ -336,7 +360,8 @@ async function collectJournalPacketEvents(options) {
 
   for (const line of lines) {
     try {
-      const entry = JSON.parse(line);
+      const normalizedLine = line.charCodeAt(0) === 0x1e ? line.slice(1) : line;
+      const entry = JSON.parse(normalizedLine);
       if (entry && typeof entry.__CURSOR === 'string') {
         lastCursor = entry.__CURSOR;
       }
@@ -513,9 +538,11 @@ async function startClient() {
 
   const journalctlBin = process.env.JOURNALCTL_BIN || 'journalctl';
   const journalGrep = process.env.JOURNAL_GREP || 'SMTP-GUARD';
+  const journalUseGrep = parseBoolean(process.env.JOURNAL_USE_GREP, false);
   const journalCursorFile = process.env.JOURNAL_CURSOR_FILE || path.join(process.cwd(), 'data', '.smtp-guard.cursor');
   const journalBatchLimit = Number(process.env.JOURNAL_BATCH_LIMIT || 500);
   const journalTimeoutMs = Number(process.env.JOURNAL_TIMEOUT_MS || 10000);
+  const packetPushBatchSize = Math.max(1, Number(process.env.PACKET_PUSH_BATCH_SIZE || 50));
 
   if (!serverUrl || !node || !username || !password) {
     console.error('[FATAL] Missing SERVER_URL, NODE_NAME, CLIENT_USERNAME or CLIENT_PASSWORD for client mode');
@@ -667,6 +694,7 @@ async function startClient() {
           journalState = await collectJournalPacketEvents({
             journalctlBin,
             journalGrep,
+            journalUseGrep,
             journalCursorFile,
             journalBatchLimit,
             journalTimeoutMs,
@@ -685,8 +713,13 @@ async function startClient() {
         }
 
         if (events.length) {
-          await postJson(logsUrl, { node, events });
-          console.log(`[LOGS] sent ${events.length} packet events`);
+          const chunks = chunkArray(events, packetPushBatchSize);
+          let sentTotal = 0;
+          for (const part of chunks) {
+            await postJson(logsUrl, { node, events: part });
+            sentTotal += part.length;
+          }
+          console.log(`[LOGS] sent ${sentTotal} packet events (${chunks.length} batch)`);
 
           if (
             packetSource === 'journal'

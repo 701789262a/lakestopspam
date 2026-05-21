@@ -108,6 +108,7 @@ Il client:
 - invia delta ban a `/api/change`
 - invia eventi ban/unban e packet logs a `/api/logs`
 - legge i log kernel `SMTP-GUARD` da `journalctl -k` (con cursore persistente locale)
+- invia packet logs a batch (`PACKET_PUSH_BATCH_SIZE`) per evitare payload troppo grandi
 - quando riceve `push_config` dal poll: valida ruleset (`nft -c -f`), scrive `CLIENT_NFT_APPLY_PATH`, applica (`nft -f`) e manda ack al server
 - quando riceve `unban_ips` dal poll: rimuove gli IP dal set nft e manda ack al server
 - polla `/api/reverse/poll` e, se richiesto, invia conf nft a `/api/reverse/submit` leggendo il file corrente `CLIENT_NFT_APPLY_PATH`
@@ -153,6 +154,7 @@ Il client:
 - I log eventi sono salvati su `LOGS_FILE` (JSONL) e `LOGS_CSV_FILE` (CSV).
 - Con `PACKET_SOURCE=file`, il client puo' troncare il file locale con `PACKET_LOG_TRUNCATE_AFTER_SEND=true`.
 - `POST /api/reverse/refresh` acquisisce la conf attuale dal file client (`CLIENT_NFT_APPLY_PATH`) e la salva lato server.
+- Se i packet log non avanzano, verifica il cursor locale `JOURNAL_CURSOR_FILE` o azzeralo (`rm -f ./data/.smtp-guard.cursor`) e riavvia il client.
 
 ## Esempi API log (admin)
 
