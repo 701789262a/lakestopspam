@@ -39,6 +39,73 @@ function appendJsonl(filePath, records) {
   fs.appendFileSync(filePath, lines);
 }
 
+function csvEscape(value) {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  const raw = String(value);
+  if (/[",\n]/.test(raw)) {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return raw;
+}
+
+function appendEventsCsv(filePath, records) {
+  if (!records.length) {
+    return;
+  }
+  ensureDir(filePath);
+
+  const header = [
+    'ts',
+    'ts_iso',
+    'node',
+    'type',
+    'action',
+    'src',
+    'dst',
+    'spt',
+    'dpt',
+    'proto',
+    'in_if',
+    'out_if',
+    'ip',
+    'reason',
+    'ports',
+    'message',
+    'payload',
+  ].join(',');
+
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
+    fs.writeFileSync(filePath, `${header}\n`);
+  }
+
+  const lines = records.map((item) => {
+    const row = [
+      item.ts,
+      item.ts ? new Date(item.ts * 1000).toISOString() : '',
+      item.node,
+      item.type,
+      item.action,
+      item.src,
+      item.dst,
+      item.spt,
+      item.dpt,
+      item.proto,
+      item.inIf,
+      item.outIf,
+      item.ip,
+      item.reason,
+      item.ports ? JSON.stringify(item.ports) : '',
+      item.message,
+      item.payload ? JSON.stringify(item.payload) : '',
+    ].map(csvEscape);
+    return row.join(',');
+  }).join('\n');
+
+  fs.appendFileSync(filePath, `${lines}\n`);
+}
+
 function parseBoolean(raw, fallback) {
   if (typeof raw !== 'string') {
     return fallback;
@@ -85,6 +152,15 @@ function normalizeEvent(input, fallbackNode) {
     ts: Number.isFinite(input.ts) ? Number(input.ts) : Math.floor(Date.now() / 1000),
     node: typeof input.node === 'string' && input.node ? input.node : fallbackNode,
     type: typeof input.type === 'string' ? input.type : 'unknown',
+    action: typeof input.action === 'string' ? input.action : undefined,
+    src: typeof input.src === 'string' ? input.src : undefined,
+    dst: typeof input.dst === 'string' ? input.dst : undefined,
+    spt: Number.isFinite(input.spt) ? Number(input.spt) : undefined,
+    dpt: Number.isFinite(input.dpt) ? Number(input.dpt) : undefined,
+    proto: typeof input.proto === 'string' ? input.proto : undefined,
+    inIf: typeof input.inIf === 'string' ? input.inIf : undefined,
+    outIf: typeof input.outIf === 'string' ? input.outIf : undefined,
+    message: typeof input.message === 'string' ? input.message : undefined,
     ip: typeof input.ip === 'string' ? input.ip : undefined,
     reason: typeof input.reason === 'string' ? input.reason : undefined,
     ports: Array.isArray(input.ports) ? input.ports.filter((p) => Number.isFinite(p)).map(Number) : undefined,
@@ -263,6 +339,7 @@ async function startServer() {
   const reverseFile = process.env.REVERSE_FILE || path.join(process.cwd(), 'data', 'reverse_requests.json');
   const nftStoreFile = process.env.NFT_STORE_FILE || path.join(process.cwd(), 'data', 'nft_configs.json');
   const logsFile = process.env.LOGS_FILE || path.join(process.cwd(), 'data', 'events.jsonl');
+  const logsCsvFile = process.env.LOGS_CSV_FILE || path.join(process.cwd(), 'data', 'events.csv');
   const autoApplyNftOnSubmit = parseBoolean(process.env.AUTO_APPLY_NFT_ON_SUBMIT, true);
   const nftApplyPath = process.env.NFT_APPLY_PATH || '/etc/nftables.conf';
   const nftBinary = process.env.NFT_BIN || 'nft';
@@ -423,6 +500,7 @@ async function startServer() {
     }
 
     appendJsonl(logsFile, normalized);
+    appendEventsCsv(logsCsvFile, normalized);
     return res.json({ status: 'ok', node, received: normalized.length });
   });
 
@@ -481,6 +559,62 @@ async function startServer() {
       status: 'ok',
       total: results.length,
       logs: results,
+    });
+  });
+
+  app.get('/api/packets', ...requireAdmin, (req, res) => {
+    const nodeFilter = typeof req.query.node === 'string' ? req.query.node : '';
+    const actionFilter = typeof req.query.action === 'string' ? req.query.action : '';
+    const fromTs = parsePositiveInt(req.query.fromTs, 0);
+    const toTs = parsePositiveInt(req.query.toTs, Number.MAX_SAFE_INTEGER);
+    const limitRaw = parsePositiveInt(req.query.limit, 200);
+    const limit = Math.min(Math.max(limitRaw, 1), 5000);
+
+    if (!fs.existsSync(logsFile)) {
+      return res.json({ status: 'ok', total: 0, packets: [] });
+    }
+
+    const lines = fs.readFileSync(logsFile, 'utf8')
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+    const packets = [];
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+          continue;
+        }
+        if (obj.type !== 'packet') {
+          continue;
+        }
+        if (nodeFilter && obj.node !== nodeFilter) {
+          continue;
+        }
+        if (actionFilter && obj.action !== actionFilter) {
+          continue;
+        }
+
+        const ts = Number.isFinite(obj.ts) ? Number(obj.ts) : 0;
+        if (ts < fromTs || ts > toTs) {
+          continue;
+        }
+
+        packets.push(obj);
+        if (packets.length >= limit) {
+          break;
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+
+    packets.reverse();
+    return res.json({
+      status: 'ok',
+      total: packets.length,
+      packets,
     });
   });
 

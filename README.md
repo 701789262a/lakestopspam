@@ -9,6 +9,7 @@ Modello auth:
 - il server restituisce JWT
 - il client usa il JWT per tutte le chiamate (`/api/change`, `/api/logs`, `/api/reverse/poll`, `/api/reverse/submit`)
 - non si usa API key
+- i log `SMTP-GUARD` vengono letti dal client da `journalctl -k`, inviati al server e salvati su file (JSONL + CSV)
 
 ## 1) Installazione
 
@@ -65,6 +66,7 @@ Endpoint server:
 - `POST /api/change` (JWT client)
 - `POST /api/logs` (JWT client)
 - `GET /api/logs` (JWT admin, query: `node`, `type`, `fromTs`, `toTs`, `limit`)
+- `GET /api/packets` (JWT admin, query: `node`, `action`, `fromTs`, `toTs`, `limit`)
 - `GET /api/reverse/poll` (JWT client)
 - `POST /api/reverse/submit` (JWT client)
 - `POST /api/reverse/request` (JWT admin)
@@ -82,10 +84,11 @@ SERVER_URL=http://IP_DEL_SERVER:8000
 NODE_NAME=node-1
 CLIENT_USERNAME=node-1
 CLIENT_PASSWORD=node-password
+PACKET_SOURCE=journal
+JOURNAL_GREP=SMTP-GUARD
 NFT_FAMILY=inet
 NFT_TABLE=pve_smtp_guard
 NFT_SET=banned_v4
-PACKET_LOG_FILE=./data/packet-events.jsonl
 ```
 
 Run:
@@ -100,6 +103,7 @@ Il client:
 - monitora nft set `banned_v4`
 - invia delta ban a `/api/change`
 - invia eventi ban/unban e packet logs a `/api/logs`
+- legge i log kernel `SMTP-GUARD` da `journalctl -k` (con cursore persistente locale)
 - polla `/api/reverse/poll` e, se richiesto, invia conf nft a `/api/reverse/submit`
 
 ## 5) Payload supportati
@@ -141,6 +145,8 @@ Il client:
 - Su `reverse/submit` il server prende `config.ruleset`, fa `nft -c -f`, poi scrive `NFT_APPLY_PATH` e fa `nft -f`.
 - Se l'apply fallisce, tenta rollback da backup `<NFT_APPLY_PATH>.bak-<timestamp>`.
 - Il processo server deve avere permessi per scrivere `NFT_APPLY_PATH` e lanciare `nft -f`.
+- I log eventi sono salvati su `LOGS_FILE` (JSONL) e `LOGS_CSV_FILE` (CSV).
+- Con `PACKET_SOURCE=file`, il client puo' troncare il file locale con `PACKET_LOG_TRUNCATE_AFTER_SEND=true`.
 
 ## Esempi API log (admin)
 
@@ -156,4 +162,11 @@ Solo pacchetti di un nodo:
 ```bash
 curl -H "Authorization: Bearer <ADMIN_JWT>" \
   "http://127.0.0.1:8000/api/logs?node=node-1&type=packet&limit=200"
+```
+
+Solo pacchetti `BAN`:
+
+```bash
+curl -H "Authorization: Bearer <ADMIN_JWT>" \
+  "http://127.0.0.1:8000/api/packets?node=node-1&action=ban&limit=200"
 ```
