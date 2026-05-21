@@ -208,6 +208,7 @@ async function collectJournalPacketEvents(options) {
     journalBatchLimit,
     journalTimeoutMs,
     node,
+    retriedWithoutCursor = false,
   } = options;
 
   const cursor = readText(journalCursorFile, '');
@@ -232,6 +233,19 @@ async function collectJournalPacketEvents(options) {
     // Treat this as "no new events", not as a hard error.
     if (exitCode === 1 && !stderr) {
       stdout = errStdout;
+    } else if (
+      exitCode === 1
+      && cursor
+      && !retriedWithoutCursor
+      && /cursor/i.test(stderr)
+    ) {
+      // Cursor can become stale after reboot/journal vacuum. Reset once and retry.
+      console.warn('[WARN] Journal cursor appears stale, resetting cursor and retrying');
+      writeText(journalCursorFile, '');
+      return collectJournalPacketEvents({
+        ...options,
+        retriedWithoutCursor: true,
+      });
     } else {
       const msg = stderr || err.message;
       throw new Error(`journalctl read failed: ${msg}`);
@@ -239,7 +253,12 @@ async function collectJournalPacketEvents(options) {
   }
 
   if (!stdout.trim()) {
-    return [];
+    return {
+      events: [],
+      previousCursor: cursor,
+      nextCursor: cursor,
+      rawLines: 0,
+    };
   }
 
   const lines = stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
@@ -262,11 +281,12 @@ async function collectJournalPacketEvents(options) {
     }
   }
 
-  if (lastCursor && lastCursor !== cursor) {
-    writeText(journalCursorFile, lastCursor);
-  }
-
-  return events;
+  return {
+    events,
+    previousCursor: cursor,
+    nextCursor: lastCursor || cursor,
+    rawLines: lines.length,
+  };
 }
 
 function loadJsonlLinesFromOffset(filePath, offset) {
@@ -572,9 +592,10 @@ async function startClient() {
     while (true) {
       try {
         let events = [];
+        let journalState = null;
 
         if (packetSource === 'journal') {
-          events = await collectJournalPacketEvents({
+          journalState = await collectJournalPacketEvents({
             journalctlBin,
             journalGrep,
             journalCursorFile,
@@ -582,6 +603,7 @@ async function startClient() {
             journalTimeoutMs,
             node,
           });
+          events = journalState.events;
         } else {
           const result = loadJsonlLinesFromOffset(packetLogFile, packetOffset);
           packetOffset = result.nextOffset;
@@ -597,6 +619,15 @@ async function startClient() {
           await postJson(logsUrl, { node, events });
           console.log(`[LOGS] sent ${events.length} packet events`);
 
+          if (
+            packetSource === 'journal'
+            && journalState
+            && journalState.nextCursor
+            && journalState.nextCursor !== journalState.previousCursor
+          ) {
+            writeText(journalCursorFile, journalState.nextCursor);
+          }
+
           if (packetSource !== 'journal' && packetLogTruncateAfterSend) {
             try {
               fs.truncateSync(packetLogFile, 0);
@@ -606,10 +637,22 @@ async function startClient() {
               console.error(`[WARN] Could not truncate packet log file: ${err.message}`);
             }
           }
+        } else if (
+          packetSource === 'journal'
+          && journalState
+          && journalState.rawLines > 0
+          && journalState.nextCursor
+          && journalState.nextCursor !== journalState.previousCursor
+        ) {
+          // Advance cursor also when lines are present but none parse cleanly,
+          // to avoid being stuck forever on the same malformed journal rows.
+          writeText(journalCursorFile, journalState.nextCursor);
         }
       } catch (err) {
         const status = err.response ? err.response.status : 'no_status';
-        const detail = err.response ? '' : `: ${err.message}`;
+        const detail = err.response
+          ? ` ${JSON.stringify(err.response.data || {})}`
+          : `: ${err.message}`;
         console.error(`[ERROR] Packet log push failed (${status})${detail}`);
       }
 
