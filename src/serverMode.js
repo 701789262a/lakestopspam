@@ -202,18 +202,14 @@ function extractRulesetFromConfig(config) {
   return null;
 }
 
-async function validateAndApplyNftRuleset(ruleset, options) {
+async function validateNftRulesetOnly(ruleset, options) {
   const {
     nftBinary,
-    nftApplyPath,
     timeoutMs,
   } = options;
 
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const tempFile = path.join(os.tmpdir(), `lakemailblock-nft-${stamp}.conf`);
-  const backupFile = `${nftApplyPath}.bak-${stamp}`;
-
-  ensureDir(nftApplyPath);
   fs.writeFileSync(tempFile, ruleset, { mode: 0o600 });
 
   try {
@@ -229,35 +225,8 @@ async function validateAndApplyNftRuleset(ruleset, options) {
     }
   }
 
-  const hadExistingTarget = fs.existsSync(nftApplyPath);
-  if (hadExistingTarget) {
-    fs.copyFileSync(nftApplyPath, backupFile);
-  }
-
-  fs.writeFileSync(nftApplyPath, ruleset);
-
-  try {
-    await execFileAsync(nftBinary, ['-f', nftApplyPath], { timeout: timeoutMs });
-  } catch (err) {
-    const stderr = err.stderr ? String(err.stderr).trim() : err.message;
-    let rollback = 'not_attempted';
-
-    if (hadExistingTarget && fs.existsSync(backupFile)) {
-      try {
-        fs.copyFileSync(backupFile, nftApplyPath);
-        await execFileAsync(nftBinary, ['-f', nftApplyPath], { timeout: timeoutMs });
-        rollback = 'restored_previous_config';
-      } catch (rollbackErr) {
-        rollback = `rollback_failed: ${rollbackErr.message}`;
-      }
-    }
-
-    throw new Error(`nft apply failed: ${stderr}; rollback=${rollback}`);
-  }
-
   return {
-    nftApplyPath,
-    backupFile: hadExistingTarget ? backupFile : null,
+    validated: true,
   };
 }
 
@@ -344,9 +313,7 @@ async function startServer() {
   const nftStoreFile = process.env.NFT_STORE_FILE || path.join(process.cwd(), 'data', 'nft_configs.json');
   const logsFile = process.env.LOGS_FILE || path.join(process.cwd(), 'data', 'events.jsonl');
   const logsCsvFile = process.env.LOGS_CSV_FILE || path.join(process.cwd(), 'data', 'events.csv');
-  const autoApplyNftOnSubmit = parseBoolean(process.env.AUTO_APPLY_NFT_ON_SUBMIT, true);
-  const applyCollectedConfigOnServer = parseBoolean(process.env.APPLY_COLLECTED_CONFIG_ON_SERVER, false);
-  const nftApplyPath = process.env.NFT_APPLY_PATH || '/etc/nftables.conf';
+  const validateRulesetOnServer = parseBoolean(process.env.VALIDATE_RULESET_ON_SERVER, true);
   const nftBinary = process.env.NFT_BIN || 'nft';
   const nftCmdTimeoutMs = Number(process.env.NFT_CMD_TIMEOUT_MS || 10000);
 
@@ -663,7 +630,7 @@ async function startServer() {
     return res.json({ status: 'ok', node, requestId, action: 'refresh_current_file' });
   });
 
-  app.post('/api/config/push', ...requireAdmin, (req, res) => {
+  app.post('/api/config/push', ...requireAdmin, async (req, res) => {
     const {
       node,
       nodes,
@@ -674,6 +641,17 @@ async function startServer() {
     const normalizedRuleset = typeof ruleset === 'string' ? ruleset.trim() : '';
     if (!normalizedRuleset) {
       return res.status(400).json({ detail: 'ruleset is required' });
+    }
+
+    if (validateRulesetOnServer) {
+      try {
+        await validateNftRulesetOnly(normalizedRuleset, {
+          nftBinary,
+          timeoutMs: nftCmdTimeoutMs,
+        });
+      } catch (err) {
+        return res.status(400).json({ detail: `ruleset validation failed: ${err.message}` });
+      }
     }
 
     let targetNodes = [];
@@ -771,20 +749,16 @@ async function startServer() {
       return res.status(400).json({ detail: 'Missing nft ruleset in config.ruleset' });
     }
 
-    let applyResult = {
-      autoApplied: false,
-      nftApplyPath,
-      backupFile: null,
+    let validation = {
+      validatedOnServer: false,
     };
 
-    const shouldApplyOnServer = autoApplyNftOnSubmit && applyCollectedConfigOnServer;
-    if (shouldApplyOnServer) {
+    if (validateRulesetOnServer) {
       try {
-        applyResult = {
-          autoApplied: true,
-          ...(await validateAndApplyNftRuleset(ruleset, {
+        validation = {
+          validatedOnServer: true,
+          ...(await validateNftRulesetOnly(ruleset, {
             nftBinary,
-            nftApplyPath,
             timeoutMs: nftCmdTimeoutMs,
           })),
         };
@@ -801,11 +775,7 @@ async function startServer() {
       updatedAt: new Date().toISOString(),
       requestId,
       config,
-      apply: {
-        autoApplied: applyResult.autoApplied,
-        nftApplyPath: applyResult.nftApplyPath,
-        backupFile: applyResult.backupFile,
-      },
+      validation,
     };
     persistNftStore();
 
@@ -813,8 +783,8 @@ async function startServer() {
     reqState.completedAt = new Date().toISOString();
     persistReverse();
 
-    console.log(`[REVERSE] node=${node} request=${requestId} submitted auto_applied=${applyResult.autoApplied}`);
-    return res.json({ status: 'ok', node, apply: nftStore[node].apply });
+    console.log(`[REVERSE] node=${node} request=${requestId} submitted validated=${validation.validatedOnServer}`);
+    return res.json({ status: 'ok', node, validation: nftStore[node].validation });
   });
 
   app.post('/api/config/ack', requireAuth, (req, res) => {
@@ -903,11 +873,7 @@ async function startServer() {
     if (jwtSecret === 'change-me-now') {
       console.warn('[WARN] JWT_SECRET is default value. Change it in production.');
     }
-    console.log(`[INFO] Reverse submit auto-apply nft: ${autoApplyNftOnSubmit ? 'enabled' : 'disabled'}`);
-    if (autoApplyNftOnSubmit) {
-      console.log(`[INFO] nft apply target: ${nftApplyPath}`);
-      console.log(`[INFO] apply collected client config on server: ${applyCollectedConfigOnServer ? 'enabled' : 'disabled'}`);
-    }
+    console.log(`[INFO] Server-side nft ruleset validation: ${validateRulesetOnServer ? 'enabled' : 'disabled'}`);
   });
 }
 

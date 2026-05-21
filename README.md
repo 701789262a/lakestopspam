@@ -50,8 +50,7 @@ HOST=0.0.0.0
 PORT=8000
 JWT_SECRET=cambia-subito
 ACCOUNTS_FILE=./config/accounts.yml
-AUTO_APPLY_NFT_ON_SUBMIT=true
-NFT_APPLY_PATH=/etc/nftables.conf
+VALIDATE_RULESET_ON_SERVER=true
 ```
 
 Run:
@@ -147,13 +146,11 @@ Il client:
 
 ## Note
 
-- Su `reverse/submit` il server prende `config.ruleset`, fa `nft -c -f`, poi scrive `NFT_APPLY_PATH` e fa `nft -f`.
-- Se l'apply fallisce, tenta rollback da backup `<NFT_APPLY_PATH>.bak-<timestamp>`.
-- Il processo server deve avere permessi per scrivere `NFT_APPLY_PATH` e lanciare `nft -f`.
+- Il server non applica mai regole nft locali.
+- Il server puo' solo validare la sintassi (`nft -c -f`) quando riceve/pusha ruleset (`VALIDATE_RULESET_ON_SERVER=true`).
 - I log eventi sono salvati su `LOGS_FILE` (JSONL) e `LOGS_CSV_FILE` (CSV).
 - Con `PACKET_SOURCE=file`, il client puo' troncare il file locale con `PACKET_LOG_TRUNCATE_AFTER_SEND=true`.
 - `POST /api/reverse/refresh` acquisisce la conf attuale dal file client (`CLIENT_NFT_APPLY_PATH`) e la salva lato server.
-- Per default il server non applica localmente la conf raccolta dal client (`APPLY_COLLECTED_CONFIG_ON_SERVER=false`).
 
 ## Esempi API log (admin)
 
