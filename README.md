@@ -73,6 +73,7 @@ Endpoint server:
 - `POST /api/config/push` (JWT admin: push config nft ai client via poll)
 - `POST /api/config/ack` (JWT client: ack esito apply config push)
 - `GET /api/reverse/latest/:node` (JWT admin)
+- `GET /api/reverse/latest` (JWT admin, tutte le ultime config per nodo)
 - `GET /api/status` (JWT admin)
 - `GET /api/status/:node` (JWT admin)
 

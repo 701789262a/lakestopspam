@@ -850,6 +850,14 @@ async function startServer() {
     return res.json({ status: 'ok', node, data });
   });
 
+  app.get('/api/reverse/latest', ...requireAdmin, (req, res) => {
+    const output = {};
+    for (const [node, data] of Object.entries(nftStore)) {
+      output[node] = data;
+    }
+    return res.json({ status: 'ok', nodes: output });
+  });
+
   app.get('/api/status', ...requireAdmin, (req, res) => {
     const output = {};
     for (const [node, ips] of state.entries()) {
