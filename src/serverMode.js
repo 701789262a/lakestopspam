@@ -348,6 +348,37 @@ async function startServer() {
     writeJsonFile(nftStoreFile, nftStore);
   }
 
+  function queueCollectConfigRequest(node, requestedBy, reason) {
+    const existing = reverseRequests[node];
+    if (existing && existing.status === 'pending') {
+      return {
+        queued: false,
+        node,
+        requestId: existing.requestId,
+        type: existing.type || 'collect_config',
+        status: existing.status,
+      };
+    }
+
+    const requestId = makeRequestId();
+    reverseRequests[node] = {
+      requestId,
+      type: 'collect_config',
+      requestedAt: new Date().toISOString(),
+      requestedBy,
+      reason: typeof reason === 'string' ? reason : 'manual',
+      status: 'pending',
+    };
+    persistReverse();
+    return {
+      queued: true,
+      node,
+      requestId,
+      type: 'collect_config',
+      status: 'pending',
+    };
+  }
+
   app.get('/health', (req, res) => {
     res.json({ status: 'ok', mode: 'server' });
   });
@@ -596,18 +627,8 @@ async function startServer() {
       return res.status(400).json({ detail: 'node is required' });
     }
 
-    const requestId = makeRequestId();
-    reverseRequests[node] = {
-      requestId,
-      type: 'collect_config',
-      requestedAt: new Date().toISOString(),
-      requestedBy: req.user.sub,
-      reason: typeof reason === 'string' ? reason : 'manual',
-      status: 'pending',
-    };
-    persistReverse();
-
-    return res.json({ status: 'ok', node, requestId });
+    const queued = queueCollectConfigRequest(node, req.user.sub, typeof reason === 'string' ? reason : 'manual');
+    return res.json({ status: 'ok', ...queued });
   });
 
   app.post('/api/reverse/refresh', ...requireAdmin, (req, res) => {
@@ -616,18 +637,12 @@ async function startServer() {
       return res.status(400).json({ detail: 'node is required' });
     }
 
-    const requestId = makeRequestId();
-    reverseRequests[node] = {
-      requestId,
-      type: 'collect_config',
-      requestedAt: new Date().toISOString(),
-      requestedBy: req.user.sub,
-      reason: typeof reason === 'string' ? reason : 'refresh_current_file',
-      status: 'pending',
-    };
-    persistReverse();
-
-    return res.json({ status: 'ok', node, requestId, action: 'refresh_current_file' });
+    const queued = queueCollectConfigRequest(
+      node,
+      req.user.sub,
+      typeof reason === 'string' ? reason : 'refresh_current_file'
+    );
+    return res.json({ status: 'ok', action: 'refresh_current_file', ...queued });
   });
 
   app.post('/api/config/push', ...requireAdmin, async (req, res) => {
@@ -835,19 +850,43 @@ async function startServer() {
 
   app.get('/api/reverse/latest/:node', ...requireAdmin, (req, res) => {
     const node = req.params.node;
+    const refresh = queueCollectConfigRequest(node, req.user.sub, 'auto_refresh_latest_single');
     const data = nftStore[node];
     if (!data) {
-      return res.status(404).json({ detail: 'Node not found' });
+      return res.status(202).json({
+        status: 'pending',
+        node,
+        detail: 'No config snapshot yet; refresh queued.',
+        refresh,
+      });
     }
-    return res.json({ status: 'ok', node, data });
+    return res.json({ status: 'ok', node, data, refresh });
   });
 
   app.get('/api/reverse/latest', ...requireAdmin, (req, res) => {
+    const latestAccounts = loadAccounts(accountsPath);
+    const knownNodes = new Set([
+      ...Object.keys(nftStore),
+      ...Object.keys(reverseRequests),
+      ...Array.from(state.keys()),
+    ]);
+
+    for (const user of latestAccounts.values()) {
+      if (user && user.role === 'client' && typeof user.node === 'string' && user.node) {
+        knownNodes.add(user.node);
+      }
+    }
+
+    const refresh = [];
+    for (const node of knownNodes) {
+      refresh.push(queueCollectConfigRequest(node, req.user.sub, 'auto_refresh_latest_all'));
+    }
+
     const output = {};
     for (const [node, data] of Object.entries(nftStore)) {
       output[node] = data;
     }
-    return res.json({ status: 'ok', nodes: output });
+    return res.json({ status: 'ok', nodes: output, refresh });
   });
 
   app.get('/api/status', ...requireAdmin, (req, res) => {

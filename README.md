@@ -72,8 +72,8 @@ Endpoint server:
 - `POST /api/reverse/refresh` (JWT admin: richiede al client snapshot della conf attuale da file)
 - `POST /api/config/push` (JWT admin: push config nft ai client via poll)
 - `POST /api/config/ack` (JWT client: ack esito apply config push)
-- `GET /api/reverse/latest/:node` (JWT admin)
-- `GET /api/reverse/latest` (JWT admin, tutte le ultime config per nodo)
+- `GET /api/reverse/latest/:node` (JWT admin, auto-refresh del nodo; `202` se snapshot non ancora disponibile)
+- `GET /api/reverse/latest` (JWT admin, auto-refresh di tutti i nodi noti)
 - `GET /api/status` (JWT admin)
 - `GET /api/status/:node` (JWT admin)
 
@@ -199,3 +199,5 @@ curl -X POST http://127.0.0.1:8000/api/reverse/refresh \
 curl -H "Authorization: Bearer <ADMIN_JWT>" \
   http://127.0.0.1:8000/api/reverse/latest/node-1
 ```
+
+Nota: ogni chiamata a `GET /api/reverse/latest` e `GET /api/reverse/latest/:node` accoda automaticamente una richiesta di refresh (`collect_config`) ai client.
