@@ -77,6 +77,7 @@ Endpoint server:
 - `GET /api/reverse/latest` (JWT admin, auto-refresh di tutti i nodi noti)
 - `GET /api/status` (JWT admin)
 - `GET /api/status/:node` (JWT admin)
+- `GET /api/nodes/active` (JWT admin, online/offline via `last_seen`)
 
 ## 4) Avvio modalità client
 
@@ -151,6 +152,7 @@ Il client:
 
 - Il server non applica mai regole nft locali.
 - Il server puo' solo validare la sintassi (`nft -c -f`) quando riceve/pusha ruleset (`VALIDATE_RULESET_ON_SERVER=true`).
+- Un nodo e' considerato online se ha `last_seen` recente (`NODE_ONLINE_TTL_MS`, default 300000 = 5 minuti).
 - I log eventi sono salvati su `LOGS_FILE` (JSONL) e `LOGS_CSV_FILE` (CSV).
 - Con `PACKET_SOURCE=file`, il client puo' troncare il file locale con `PACKET_LOG_TRUNCATE_AFTER_SEND=true`.
 - `POST /api/reverse/refresh` acquisisce la conf attuale dal file client (`CLIENT_NFT_APPLY_PATH`) e la salva lato server.

@@ -367,8 +367,10 @@ async function startServer() {
   const stateFile = process.env.STATE_FILE || path.join(process.cwd(), 'data', 'state.json');
   const reverseFile = process.env.REVERSE_FILE || path.join(process.cwd(), 'data', 'reverse_requests.json');
   const nftStoreFile = process.env.NFT_STORE_FILE || path.join(process.cwd(), 'data', 'nft_configs.json');
+  const nodeActivityFile = process.env.NODE_ACTIVITY_FILE || path.join(process.cwd(), 'data', 'node_activity.json');
   const logsFile = process.env.LOGS_FILE || path.join(process.cwd(), 'data', 'events.jsonl');
   const logsCsvFile = process.env.LOGS_CSV_FILE || path.join(process.cwd(), 'data', 'events.csv');
+  const nodeOnlineTtlMs = Math.max(1000, Number(process.env.NODE_ONLINE_TTL_MS || 300000));
   const validateRulesetOnServer = parseBoolean(process.env.VALIDATE_RULESET_ON_SERVER, true);
   const nftBinary = process.env.NFT_BIN || 'nft';
   const nftCmdTimeoutMs = Number(process.env.NFT_CMD_TIMEOUT_MS || 10000);
@@ -380,6 +382,7 @@ async function startServer() {
 
   const reverseRequests = readJsonFile(reverseFile, {});
   const nftStore = readJsonFile(nftStoreFile, {});
+  const nodeActivity = readJsonFile(nodeActivityFile, {});
 
   let accounts = loadAccounts(accountsPath);
 
@@ -404,6 +407,73 @@ async function startServer() {
 
   function persistNftStore() {
     writeJsonFile(nftStoreFile, nftStore);
+  }
+
+  function persistNodeActivity() {
+    writeJsonFile(nodeActivityFile, nodeActivity);
+  }
+
+  function markNodeSeen(node, source, by) {
+    if (typeof node !== 'string' || !node) {
+      return;
+    }
+    const nowTs = Date.now();
+    nodeActivity[node] = {
+      lastSeenAt: new Date(nowTs).toISOString(),
+      lastSeenTs: nowTs,
+      source: typeof source === 'string' ? source : 'unknown',
+      by: typeof by === 'string' ? by : undefined,
+    };
+    persistNodeActivity();
+  }
+
+  function getNodeOnlineInfo() {
+    const nowTs = Date.now();
+    const latestAccounts = loadAccounts(accountsPath);
+    const knownNodes = new Set([
+      ...Object.keys(nodeActivity),
+      ...Object.keys(nftStore),
+      ...Object.keys(reverseRequests),
+      ...Array.from(state.keys()),
+    ]);
+    for (const user of latestAccounts.values()) {
+      if (user && user.role === 'client' && typeof user.node === 'string' && user.node) {
+        knownNodes.add(user.node);
+      }
+    }
+
+    const onlineNodes = [];
+    const offlineNodes = [];
+    const details = {};
+
+    for (const node of knownNodes) {
+      const meta = nodeActivity[node] || null;
+      const lastSeenTs = meta && Number.isFinite(meta.lastSeenTs) ? Number(meta.lastSeenTs) : null;
+      const isOnline = lastSeenTs !== null && (nowTs - lastSeenTs) <= nodeOnlineTtlMs;
+      const item = {
+        node,
+        online: isOnline,
+        lastSeenAt: meta ? meta.lastSeenAt : null,
+        lastSeenTs,
+        source: meta ? (meta.source || null) : null,
+      };
+      details[node] = item;
+      if (isOnline) {
+        onlineNodes.push(node);
+      } else {
+        offlineNodes.push(node);
+      }
+    }
+
+    onlineNodes.sort();
+    offlineNodes.sort();
+    return {
+      nowTs,
+      ttlMs: nodeOnlineTtlMs,
+      onlineNodes,
+      offlineNodes,
+      details,
+    };
   }
 
   function queueCollectConfigRequest(node, requestedBy, reason) {
@@ -504,6 +574,10 @@ async function startServer() {
     const role = typeof user.role === 'string' && user.role ? user.role : 'client';
     const node = typeof user.node === 'string' ? user.node : undefined;
 
+    if (role === 'client' && node) {
+      markNodeSeen(node, 'login', username);
+    }
+
     const token = jwt.sign(
       { sub: username, role, node },
       jwtSecret,
@@ -531,6 +605,7 @@ async function startServer() {
     if (node === '__forbidden__') {
       return res.status(403).json({ detail: 'Node mismatch with token' });
     }
+    markNodeSeen(node, 'change', req.user && req.user.sub);
 
     const current = state.get(node) || new Set();
     for (const ip of added) {
@@ -586,6 +661,7 @@ async function startServer() {
     if (node === '__forbidden__') {
       return res.status(403).json({ detail: 'Node mismatch with token' });
     }
+    markNodeSeen(node, 'logs', req.user && req.user.sub);
 
     const normalized = [];
     for (const event of events) {
@@ -864,6 +940,7 @@ async function startServer() {
     if (node === '__forbidden__') {
       return res.status(403).json({ detail: 'Node mismatch with token' });
     }
+    markNodeSeen(node, 'reverse_poll', req.user && req.user.sub);
 
     const reqState = reverseRequests[node];
     if (!reqState || reqState.status !== 'pending') {
@@ -895,6 +972,7 @@ async function startServer() {
     if (node === '__forbidden__') {
       return res.status(403).json({ detail: 'Node mismatch with token' });
     }
+    markNodeSeen(node, 'reverse_submit', req.user && req.user.sub);
 
     const reqState = reverseRequests[node];
     if (!reqState || reqState.requestId !== requestId) {
@@ -963,6 +1041,7 @@ async function startServer() {
     if (node === '__forbidden__') {
       return res.status(403).json({ detail: 'Node mismatch with token' });
     }
+    markNodeSeen(node, 'config_ack', req.user && req.user.sub);
 
     const reqState = reverseRequests[node];
     if (!reqState || reqState.requestId !== requestId) {
@@ -1108,6 +1187,18 @@ async function startServer() {
       output[node] = Array.from(ips).sort();
     }
     return res.json(output);
+  });
+
+  app.get('/api/nodes/active', ...requireAdmin, (req, res) => {
+    const info = getNodeOnlineInfo();
+    return res.json({
+      status: 'ok',
+      nowTs: info.nowTs,
+      ttlMs: info.ttlMs,
+      onlineNodes: info.onlineNodes,
+      offlineNodes: info.offlineNodes,
+      details: info.details,
+    });
   });
 
   app.get('/api/status/:node', ...requireAdmin, (req, res) => {
