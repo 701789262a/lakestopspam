@@ -241,6 +241,8 @@ function parseSmtpGuardEventFromJournal(entry, node) {
   let action = 'other';
   if (message.includes('SMTP-GUARD BAN')) {
     action = 'ban';
+  } else if (message.includes('SMTP-GUARD RETRY')) {
+    action = 'retry';
   } else if (message.includes('SMTP-GUARD OK')) {
     action = 'ok';
   }
@@ -264,7 +266,9 @@ function parseSmtpGuardEventFromJournal(entry, node) {
     inIf: kv.IN,
     outIf: kv.OUT,
     ip: kv.SRC,
-    reason: action === 'ban' ? 'smtp_guard_ban' : 'smtp_guard_ok',
+    reason: action === 'ban'
+      ? 'smtp_guard_ban'
+      : (action === 'retry' ? 'smtp_guard_retry' : 'smtp_guard_ok'),
     ports: Number.isFinite(dpt) ? [dpt] : undefined,
     message,
     payload: {
