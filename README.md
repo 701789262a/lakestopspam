@@ -72,7 +72,8 @@ Endpoint server:
 - `POST /api/reverse/refresh` (JWT admin: richiede al client snapshot della conf attuale da file)
 - `POST /api/config/push` (JWT admin: push config nft ai client via poll)
 - `POST /api/unban` (JWT admin: richiede unban IP su nodo via poll client)
-- `POST /api/config/ack` (JWT client: ack esito azioni push/unban)
+- `POST /api/protection` (JWT admin: `pause`/`resume` protezione su nodo via poll client)
+- `POST /api/config/ack` (JWT client: ack esito azioni push/unban/protection)
 - `GET /api/reverse/latest/:node` (JWT admin, auto-refresh del nodo; `202` se snapshot non ancora disponibile)
 - `GET /api/reverse/latest` (JWT admin, auto-refresh di tutti i nodi noti)
 - `GET /api/status` (JWT admin)
@@ -112,6 +113,8 @@ Il client:
 - invia packet logs a batch (`PACKET_PUSH_BATCH_SIZE`) per evitare payload troppo grandi
 - quando riceve `push_config` dal poll: valida ruleset (`nft -c -f`), scrive `CLIENT_NFT_APPLY_PATH`, applica (`nft -f`) e manda ack al server
 - quando riceve `unban_ips` dal poll: rimuove gli IP dal set nft e manda ack al server
+- quando riceve `pause_protection`: esegue `flush table <NFT_FAMILY> <NFT_TABLE>`
+- quando riceve `resume_protection`: riapplica `CLIENT_NFT_APPLY_PATH` con `nft -f`
 - polla `/api/reverse/poll` e, se richiesto, invia conf nft a `/api/reverse/submit` leggendo il file corrente `CLIENT_NFT_APPLY_PATH`
 
 ## 5) Payload supportati

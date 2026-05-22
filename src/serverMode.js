@@ -932,6 +932,55 @@ async function startServer() {
     });
   });
 
+  app.post('/api/protection', ...requireAdmin, (req, res) => {
+    const {
+      node,
+      action,
+      reason,
+    } = req.body || {};
+
+    if (typeof node !== 'string' || !node.trim()) {
+      return res.status(400).json({ detail: 'node is required' });
+    }
+    const normalizedNode = node.trim();
+
+    const normalizedAction = typeof action === 'string' ? action.trim().toLowerCase() : '';
+    if (normalizedAction !== 'pause' && normalizedAction !== 'resume') {
+      return res.status(400).json({ detail: "action must be 'pause' or 'resume'" });
+    }
+
+    const existing = reverseRequests[normalizedNode];
+    if (existing && existing.status === 'pending') {
+      return res.status(409).json({
+        detail: `Node ${normalizedNode} already has a pending request (${existing.type || 'unknown'})`,
+        requestId: existing.requestId,
+      });
+    }
+
+    const requestId = makeRequestId();
+    const requestType = normalizedAction === 'pause' ? 'pause_protection' : 'resume_protection';
+    reverseRequests[normalizedNode] = {
+      requestId,
+      type: requestType,
+      requestedAt: new Date().toISOString(),
+      requestedBy: req.user.sub,
+      reason: typeof reason === 'string' && reason.trim() ? reason.trim() : `admin_${normalizedAction}_protection`,
+      status: 'pending',
+      protection: {
+        action: normalizedAction,
+      },
+    };
+    persistReverse();
+
+    return res.json({
+      status: 'ok',
+      node: normalizedNode,
+      requestId,
+      type: requestType,
+      action: normalizedAction,
+    });
+  });
+
   app.get('/api/reverse/poll', requireAuth, (req, res) => {
     const node = resolveNodeFromRequest(req, req.query.node);
     if (!node) {
@@ -958,6 +1007,9 @@ async function startServer() {
         requestedAt: reqState.requestedAt,
         config: reqState.type === 'push_config' ? reqState.config : undefined,
         unban: reqState.type === 'unban_ips' ? reqState.unban : undefined,
+        protection: (reqState.type === 'pause_protection' || reqState.type === 'resume_protection')
+          ? reqState.protection
+          : undefined,
       },
     });
   });
@@ -1047,8 +1099,13 @@ async function startServer() {
     if (!reqState || reqState.requestId !== requestId) {
       return res.status(404).json({ detail: 'No matching pending request' });
     }
-    if (reqState.type !== 'push_config' && reqState.type !== 'unban_ips') {
-      return res.status(409).json({ detail: 'Request type mismatch: expected push_config or unban_ips' });
+    if (
+      reqState.type !== 'push_config'
+      && reqState.type !== 'unban_ips'
+      && reqState.type !== 'pause_protection'
+      && reqState.type !== 'resume_protection'
+    ) {
+      return res.status(409).json({ detail: 'Request type mismatch: expected push_config, unban_ips, pause_protection or resume_protection' });
     }
 
     const success = Boolean(ok);
@@ -1090,6 +1147,44 @@ async function startServer() {
           appendJsonl(logsFile, unbanEvents);
           appendEventsCsv(logsCsvFile, unbanEvents);
         }
+      }
+
+      if (reqState.type === 'pause_protection') {
+        const current = state.get(node) || new Set();
+        const removed = Array.from(current);
+        state.set(node, new Set());
+        persistState();
+
+        const nowTs = Math.floor(Date.now() / 1000);
+        const pauseEvent = {
+          ts: nowTs,
+          node,
+          type: 'protection',
+          action: 'pause',
+          reason: 'admin_pause_protection_ack',
+          payload: {
+            requestId,
+            removedBans: removed.length,
+          },
+        };
+        appendJsonl(logsFile, [pauseEvent]);
+        appendEventsCsv(logsCsvFile, [pauseEvent]);
+      }
+
+      if (reqState.type === 'resume_protection') {
+        const nowTs = Math.floor(Date.now() / 1000);
+        const resumeEvent = {
+          ts: nowTs,
+          node,
+          type: 'protection',
+          action: 'resume',
+          reason: 'admin_resume_protection_ack',
+          payload: {
+            requestId,
+          },
+        };
+        appendJsonl(logsFile, [resumeEvent]);
+        appendEventsCsv(logsCsvFile, [resumeEvent]);
       }
 
       return res.status(200).json({ status: 'ok', node, requestId, type: reqState.type });

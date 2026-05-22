@@ -516,6 +516,37 @@ async function validateAndApplyLocalNftRuleset(ruleset, options) {
   };
 }
 
+async function pauseProtection(options) {
+  const {
+    nftBinary,
+    nftFamily,
+    nftTable,
+    timeoutMs,
+  } = options;
+
+  await execFileAsync(nftBinary, ['flush', 'table', nftFamily, nftTable], { timeout: timeoutMs });
+  return {
+    action: 'pause',
+    nftFamily,
+    nftTable,
+  };
+}
+
+async function resumeProtection(options) {
+  const {
+    nftBinary,
+    nftApplyPath,
+    timeoutMs,
+  } = options;
+
+  await execFileAsync(nftBinary, ['-c', '-f', nftApplyPath], { timeout: timeoutMs });
+  await execFileAsync(nftBinary, ['-f', nftApplyPath], { timeout: timeoutMs });
+  return {
+    action: 'resume',
+    nftApplyPath,
+  };
+}
+
 async function startClient() {
   const serverUrl = (process.env.SERVER_URL || '').replace(/\/$/, '');
   const node = process.env.NODE_NAME || '';
@@ -858,6 +889,61 @@ async function startClient() {
                 });
                 console.error(`[UNBAN] Apply failed request=${data.request.requestId} ack_status=${ackResp.status} error=${err.message}`);
               }
+            }
+          } else if (requestType === 'pause_protection') {
+            try {
+              const result = await pauseProtection({
+                nftBinary: clientNftBin,
+                nftFamily,
+                nftTable,
+                timeoutMs: clientNftCmdTimeoutMs,
+              });
+              const ackResp = await postJsonAnyStatus(configAckUrl, {
+                node,
+                requestId: data.request.requestId,
+                ok: true,
+                details: result,
+              });
+              if (ackResp.status === 200) {
+                console.log(`[PROTECTION] Paused request=${data.request.requestId}`);
+              } else {
+                console.error(`[PROTECTION] Unexpected pause ack status=${ackResp.status} request=${data.request.requestId}`);
+              }
+            } catch (err) {
+              const ackResp = await postJsonAnyStatus(configAckUrl, {
+                node,
+                requestId: data.request.requestId,
+                ok: false,
+                error: err.message,
+              });
+              console.error(`[PROTECTION] Pause failed request=${data.request.requestId} ack_status=${ackResp.status} error=${err.message}`);
+            }
+          } else if (requestType === 'resume_protection') {
+            try {
+              const result = await resumeProtection({
+                nftBinary: clientNftBin,
+                nftApplyPath: clientNftApplyPath,
+                timeoutMs: clientNftCmdTimeoutMs,
+              });
+              const ackResp = await postJsonAnyStatus(configAckUrl, {
+                node,
+                requestId: data.request.requestId,
+                ok: true,
+                details: result,
+              });
+              if (ackResp.status === 200) {
+                console.log(`[PROTECTION] Resumed request=${data.request.requestId}`);
+              } else {
+                console.error(`[PROTECTION] Unexpected resume ack status=${ackResp.status} request=${data.request.requestId}`);
+              }
+            } catch (err) {
+              const ackResp = await postJsonAnyStatus(configAckUrl, {
+                node,
+                requestId: data.request.requestId,
+                ok: false,
+                error: err.message,
+              });
+              console.error(`[PROTECTION] Resume failed request=${data.request.requestId} ack_status=${ackResp.status} error=${err.message}`);
             }
           } else {
             const config = await collectNftConfig(
