@@ -206,6 +206,19 @@ function normalizeEvent(input, fallbackNode) {
     payload: input.payload && typeof input.payload === 'object' ? input.payload : undefined,
   };
 
+  if (event.type === 'packet') {
+    const msg = typeof event.message === 'string' ? event.message.toUpperCase() : '';
+    if ((!event.action || event.action === 'other') && msg) {
+      if (msg.includes('SMTP-GUARD RETRY')) {
+        event.action = 'retry';
+      } else if (msg.includes('SMTP-GUARD BAN')) {
+        event.action = 'ban';
+      } else if (msg.includes('SMTP-GUARD OK')) {
+        event.action = 'ok';
+      }
+    }
+  }
+
   if (!event.node) {
     return null;
   }
