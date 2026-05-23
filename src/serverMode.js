@@ -81,9 +81,10 @@ function appendEventsCsv(filePath, records) {
   }
 
   const lines = records.map((item) => {
+    const tsMs = normalizeEpochMs(item.ts);
     const row = [
       item.ts,
-      item.ts ? new Date(item.ts * 1000).toISOString() : '',
+      tsMs ? new Date(tsMs).toISOString() : '',
       item.node,
       item.type,
       item.action,
@@ -118,6 +119,17 @@ function parseBoolean(raw, fallback) {
     return false;
   }
   return fallback;
+}
+
+function normalizeEpochMs(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return null;
+  }
+  if (Math.abs(num) >= 1e12) {
+    return Math.floor(num);
+  }
+  return Math.floor(num * 1000);
 }
 
 function loadAccounts(accountsPath) {
@@ -188,7 +200,7 @@ function normalizeEvent(input, fallbackNode) {
   }
 
   const event = {
-    ts: Number.isFinite(input.ts) ? Number(input.ts) : Math.floor(Date.now() / 1000),
+    ts: Number.isFinite(input.ts) ? (normalizeEpochMs(input.ts) || Date.now()) : Date.now(),
     node: typeof input.node === 'string' && input.node ? input.node : fallbackNode,
     type: typeof input.type === 'string' ? input.type : 'unknown',
     action: typeof input.action === 'string' ? input.action : undefined,
@@ -1132,7 +1144,7 @@ async function startServer() {
         persistState();
 
         if (removed.length) {
-          const nowTs = Math.floor(Date.now() / 1000);
+          const nowTs = Date.now();
           const unbanEvents = removed.map((removedIp) => ({
             ts: nowTs,
             node,
@@ -1155,7 +1167,7 @@ async function startServer() {
         state.set(node, new Set());
         persistState();
 
-        const nowTs = Math.floor(Date.now() / 1000);
+        const nowTs = Date.now();
         const pauseEvent = {
           ts: nowTs,
           node,
@@ -1172,7 +1184,7 @@ async function startServer() {
       }
 
       if (reqState.type === 'resume_protection') {
-        const nowTs = Math.floor(Date.now() / 1000);
+        const nowTs = Date.now();
         const resumeEvent = {
           ts: nowTs,
           node,

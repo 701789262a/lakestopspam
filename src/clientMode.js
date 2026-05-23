@@ -193,7 +193,7 @@ async function unbanIpsFromNftSet(requestedIps, options) {
 
 function buildEvent(node, type, ip, reason, ports) {
   return {
-    ts: Math.floor(Date.now() / 1000),
+    ts: Date.now(),
     node,
     type,
     ip,
@@ -251,7 +251,7 @@ function parseSmtpGuardEventFromJournal(entry, node) {
   const spt = toInt(kv.SPT);
   const dpt = toInt(kv.DPT);
   const tsMicros = Number(entry.__REALTIME_TIMESTAMP);
-  const ts = Number.isFinite(tsMicros) ? Math.floor(tsMicros / 1000000) : Math.floor(Date.now() / 1000);
+  const ts = Number.isFinite(tsMicros) ? Math.floor(tsMicros / 1000) : Date.now();
 
   return {
     ts,
@@ -743,7 +743,7 @@ async function startClient() {
           events = result.events.map((evt) => ({
             ...evt,
             node: typeof evt.node === 'string' && evt.node ? evt.node : node,
-            ts: Number.isFinite(evt.ts) ? Number(evt.ts) : Math.floor(Date.now() / 1000),
+            ts: Number.isFinite(evt.ts) ? Number(evt.ts) : Date.now(),
           }));
         }
 
